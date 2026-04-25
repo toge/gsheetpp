@@ -55,6 +55,7 @@ find_package(jwt-cpp CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
 add_library(gsheetpp)
+add_library(gsheetpp::gsheetpp ALIAS gsheetpp)
 target_sources(gsheetpp
   PRIVATE
     ${CMAKE_SOURCE_DIR}/src/google_sheets_client.cpp
