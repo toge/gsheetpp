@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    "catch2",
+    "curl",
+    "glaze",
+    "jwt-cpp",
+    "nlohmann-json",
+    "openssl"
+  ]
+}
