@@ -3,13 +3,42 @@
 #include "gsheetpp/google_sheets_client.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <expected>
+#include <mutex>
 #include <string_view>
 
 /**
  * @brief 実装の詳細を保持する内部用名前空間
  */
 namespace gsheetpp::detail {
+
+class RefreshInProgressGuard {
+ public:
+  RefreshInProgressGuard(
+      std::mutex& mutex,
+      std::condition_variable& cv,
+      bool& refresh_in_progress)
+      : mutex_{mutex},
+        cv_{cv},
+        refresh_in_progress_{refresh_in_progress} {}
+
+  RefreshInProgressGuard(RefreshInProgressGuard const&) = delete;
+  auto operator=(RefreshInProgressGuard const&) -> RefreshInProgressGuard& = delete;
+  RefreshInProgressGuard(RefreshInProgressGuard&&) = delete;
+  auto operator=(RefreshInProgressGuard&&) -> RefreshInProgressGuard& = delete;
+
+  ~RefreshInProgressGuard() {
+    auto lock = std::scoped_lock{mutex_};
+    refresh_in_progress_ = false;
+    cv_.notify_all();
+  }
+
+ private:
+  std::mutex& mutex_;
+  std::condition_variable& cv_;
+  bool& refresh_in_progress_;
+};
 
 /**
  * @brief トークンレスポンスの JSON を TokenInfo にパースします
@@ -45,13 +74,12 @@ auto parse_write_values_response(std::string_view json)
     -> std::expected<WriteValuesResult, GoogleSheetsError>;
 
 /**
- * @brief 一般的な API エラーレスポンスをパースします
+ * @brief 一般的な API エラーレスポンスをパースしてエラーメッセージを抽出します
  * @param json エラー JSON
- * @param http_status HTTP ステータスコード
- * @return 常に std::unexpected(GoogleSheetsError)
+ * @return API エラーメッセージ、またはパース失敗時の GoogleSheetsError
  */
-auto parse_api_error_response(std::string_view json, long http_status)
-    -> std::expected<void, GoogleSheetsError>;
+auto parse_api_error_response(std::string_view json)
+    -> std::expected<std::string, GoogleSheetsError>;
 
 /**
  * @brief 認証用の JWT アサーションを構築・署名します

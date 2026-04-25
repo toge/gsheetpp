@@ -25,6 +25,10 @@ struct GoogleSheetsClient::SharedState {
 
 namespace {
 
+auto constexpr ignore_unknown_keys_opts = glz::opts{
+    .error_on_unknown_keys = false,
+};
+
 struct TokenResponsePayload {
   std::string access_token{};
   std::string token_type{};
@@ -92,7 +96,7 @@ auto parse_json(std::string_view json, std::string_view message)
     -> std::expected<T, GoogleSheetsError> {
   auto value = T{};
   auto const json_buffer = std::string{json};
-  if (auto const ec = glz::read_json(value, json_buffer)) {
+  if (auto const ec = glz::read<ignore_unknown_keys_opts>(value, json_buffer)) {
     return std::unexpected{make_parse_error(message)};
   }
   return value;
@@ -154,13 +158,17 @@ auto perform_authenticated_request(
 
 auto handle_sheet_error(std::string_view body, long status)
     -> std::unexpected<GoogleSheetsError> {
-  auto api_error = detail::parse_api_error_response(body, status);
-  if (!api_error.has_value()) {
-    return std::unexpected{api_error.error()};
+  auto api_error_message = detail::parse_api_error_response(body);
+  if (!api_error_message) {
+    return std::unexpected{make_http_error(
+        GoogleSheetsErrorKind::http,
+        "google sheets request failed",
+        status,
+        body)};
   }
   return std::unexpected{make_http_error(
-      GoogleSheetsErrorKind::http,
-      "google sheets request failed",
+      GoogleSheetsErrorKind::api_response,
+      api_error_message->empty() ? "google api request failed" : *api_error_message,
       status,
       body)};
 }
@@ -186,23 +194,22 @@ GoogleSheetsClient::GoogleSheetsClient(
 
 auto parse_service_account_config(std::string_view json)
     -> std::expected<ServiceAccountConfig, GoogleSheetsError> {
-  auto config = ServiceAccountConfig{};
-  auto const json_buffer = std::string{json};
-  if (auto const ec = glz::read_json(config, json_buffer)) {
-    return std::unexpected{make_parse_error("failed to parse service account JSON")};
+  auto config = parse_json<ServiceAccountConfig>(json, "failed to parse service account JSON");
+  if (!config) {
+    return std::unexpected{config.error()};
   }
 
-  if (config.client_email.empty()) {
+  if (config->client_email.empty()) {
     return std::unexpected{make_configuration_error("client_email is required")};
   }
-  if (config.private_key.empty()) {
+  if (config->private_key.empty()) {
     return std::unexpected{make_configuration_error("private_key is required")};
   }
-  if (config.token_uri.empty()) {
+  if (config->token_uri.empty()) {
     return std::unexpected{make_configuration_error("token_uri is required")};
   }
 
-  return config;
+  return std::move(config.value());
 }
 
 auto GoogleSheetsClient::authenticate_async()
@@ -291,49 +298,7 @@ auto GoogleSheetsClient::refresh_token() -> std::expected<TokenInfo, GoogleSheet
     shared_state_->refresh_in_progress = true;
   }
 
-  auto const issued_at = now_or_default(clock_);
-  auto assertion = detail::build_jwt_assertion(config_, issued_at);
-  if (!assertion) {
-    auto lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->refresh_in_progress = false;
-    shared_state_->cv.notify_all();
-    return std::unexpected{assertion.error()};
-  }
-
-  auto response = perform_authenticated_request(
-      transport_,
-      detail::HttpRequest{
-          .method = "POST",
-          .url = config_.token_uri,
-          .headers = {"Content-Type: application/x-www-form-urlencoded"},
-          .body = detail::build_token_request_body(assertion.value()),
-      });
-  if (!response) {
-    auto lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->refresh_in_progress = false;
-    shared_state_->cv.notify_all();
-    return std::unexpected{response.error()};
-  }
-  if (response->status_code >= 400) {
-    auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
-    auto lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->refresh_in_progress = false;
-    shared_state_->cv.notify_all();
-    return std::unexpected{auth_error.error()};
-  }
-
-  auto token = detail::parse_token_response(response->body);
-  auto lock = std::scoped_lock{shared_state_->mutex};
-  shared_state_->refresh_in_progress = false;
-  if (!token) {
-    shared_state_->cv.notify_all();
-    return std::unexpected{token.error()};
-  }
-
-  shared_state_->token = token.value();
-  shared_state_->expires_at = issued_at + std::chrono::seconds{token->expires_in_seconds};
-  shared_state_->cv.notify_all();
-  return token;
+  return do_token_fetch();
 }
 
 /**
@@ -356,12 +321,18 @@ auto GoogleSheetsClient::get_valid_token() -> std::expected<TokenInfo, GoogleShe
   shared_state_->refresh_in_progress = true;
   lock.unlock();
 
+  return do_token_fetch();
+}
+
+auto GoogleSheetsClient::do_token_fetch() -> std::expected<TokenInfo, GoogleSheetsError> {
+  auto guard = detail::RefreshInProgressGuard{
+      shared_state_->mutex,
+      shared_state_->cv,
+      shared_state_->refresh_in_progress,
+  };
   auto const issued_at = now_or_default(clock_);
   auto assertion = detail::build_jwt_assertion(config_, issued_at);
   if (!assertion) {
-    auto failure_lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->refresh_in_progress = false;
-    shared_state_->cv.notify_all();
     return std::unexpected{assertion.error()};
   }
 
@@ -374,30 +345,24 @@ auto GoogleSheetsClient::get_valid_token() -> std::expected<TokenInfo, GoogleShe
           .body = detail::build_token_request_body(assertion.value()),
       });
   if (!response) {
-    auto failure_lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->refresh_in_progress = false;
-    shared_state_->cv.notify_all();
     return std::unexpected{response.error()};
   }
   if (response->status_code >= 400) {
     auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
-    auto failure_lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->refresh_in_progress = false;
-    shared_state_->cv.notify_all();
     return std::unexpected{auth_error.error()};
   }
 
   auto token = detail::parse_token_response(response->body);
-  auto success_lock = std::scoped_lock{shared_state_->mutex};
-  shared_state_->refresh_in_progress = false;
   if (!token) {
-    shared_state_->cv.notify_all();
     return std::unexpected{token.error()};
   }
 
-  shared_state_->token = token.value();
-  shared_state_->expires_at = issued_at + std::chrono::seconds{token->expires_in_seconds};
-  shared_state_->cv.notify_all();
+  {
+    auto lock = std::scoped_lock{shared_state_->mutex};
+    shared_state_->token = token.value();
+    shared_state_->expires_at = issued_at + std::chrono::seconds{token->expires_in_seconds};
+  }
+
   return token;
 }
 
@@ -456,18 +421,14 @@ auto parse_write_values_response(std::string_view json)
   };
 }
 
-auto parse_api_error_response(std::string_view json, long http_status)
-    -> std::expected<void, GoogleSheetsError> {
+auto parse_api_error_response(std::string_view json)
+    -> std::expected<std::string, GoogleSheetsError> {
   auto payload = parse_json<GoogleApiErrorPayload>(json, "failed to parse API error response");
   if (!payload) {
     return std::unexpected{payload.error()};
   }
 
-  return std::unexpected{make_http_error(
-      GoogleSheetsErrorKind::api_response,
-      payload->error.message.empty() ? "google api request failed" : payload->error.message,
-      http_status,
-      json)};
+  return std::move(payload->error.message);
 }
 
 auto build_jwt_assertion(

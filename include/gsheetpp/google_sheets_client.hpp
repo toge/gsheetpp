@@ -165,6 +165,7 @@ class GoogleSheetsClient {
  private:
   struct SharedState;
 
+  auto do_token_fetch() -> std::expected<TokenInfo, GoogleSheetsError>;
   auto refresh_token() -> std::expected<TokenInfo, GoogleSheetsError>;
   auto get_valid_token() -> std::expected<TokenInfo, GoogleSheetsError>;
 

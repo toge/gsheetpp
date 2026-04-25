@@ -46,6 +46,31 @@ auto make_test_private_key() -> std::string {
 
 }  // namespace
 
+TEST_CASE("refresh guard clears flag and notifies on exception", "[client]") {
+  auto mutex = std::mutex{};
+  auto cv = std::condition_variable{};
+  auto refresh_in_progress = true;
+  auto released = std::atomic_bool{false};
+
+  auto waiter = std::jthread{[&] {
+    auto lock = std::unique_lock{mutex};
+    cv.wait(lock, [&] { return !refresh_in_progress; });
+    released = true;
+  }};
+
+  try {
+    auto guard = gsheetpp::detail::RefreshInProgressGuard{mutex, cv, refresh_in_progress};
+    throw 1;
+  }
+  catch (int const) {
+  }
+
+  waiter.join();
+
+  CHECK_FALSE(refresh_in_progress);
+  CHECK(released.load());
+}
+
 TEST_CASE("service account JSON is parsed into config", "[service-account]") {
   auto const json = R"({
     "client_email":"svc@example.iam.gserviceaccount.com",
@@ -61,11 +86,51 @@ TEST_CASE("service account JSON is parsed into config", "[service-account]") {
   CHECK(parsed->token_uri == "https://oauth2.googleapis.com/token");
 }
 
+TEST_CASE("service account JSON ignores extra Google fields", "[service-account]") {
+  auto const json = R"({
+    "type":"service_account",
+    "project_id":"demo-project",
+    "private_key_id":"private-key-id",
+    "private_key":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+    "client_email":"svc@example.iam.gserviceaccount.com",
+    "client_id":"123456789012345678901",
+    "auth_uri":"https://accounts.google.com/o/oauth2/auth",
+    "token_uri":"https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url":"https://www.googleapis.com/robot/v1/metadata/x509/svc%40example.iam.gserviceaccount.com",
+    "universe_domain":"googleapis.com"
+  })";
+
+  auto parsed = gsheetpp::parse_service_account_config(json);
+
+  REQUIRE(parsed.has_value());
+  CHECK(parsed->client_email == "svc@example.iam.gserviceaccount.com");
+  CHECK(parsed->token_uri == "https://oauth2.googleapis.com/token");
+  CHECK(parsed->project_id == "demo-project");
+}
+
 TEST_CASE("token response is parsed", "[responses]") {
   auto const json = R"({
     "access_token":"token-value",
     "token_type":"Bearer",
     "expires_in":3600
+  })";
+
+  auto parsed = gsheetpp::detail::parse_token_response(json);
+
+  REQUIRE(parsed.has_value());
+  CHECK(parsed->access_token == "token-value");
+  CHECK(parsed->token_type == "Bearer");
+  CHECK(parsed->expires_in_seconds == 3600);
+}
+
+TEST_CASE("token response ignores unknown fields", "[responses]") {
+  auto const json = R"({
+    "access_token":"token-value",
+    "token_type":"Bearer",
+    "expires_in":3600,
+    "scope":"https://www.googleapis.com/auth/spreadsheets",
+    "unexpected":"value"
   })";
 
   auto parsed = gsheetpp::detail::parse_token_response(json);
@@ -130,7 +195,7 @@ TEST_CASE("malformed JSON becomes serialization error", "[responses]") {
   CHECK(parsed.error().kind == gsheetpp::GoogleSheetsErrorKind::serialization);
 }
 
-TEST_CASE("api error payload becomes api_response error", "[responses]") {
+TEST_CASE("api error payload message is parsed", "[responses]") {
   auto const json = R"({
     "error": {
       "code": 403,
@@ -139,12 +204,10 @@ TEST_CASE("api error payload becomes api_response error", "[responses]") {
     }
   })";
 
-  auto parsed = gsheetpp::detail::parse_api_error_response(json, 403);
+  auto parsed = gsheetpp::detail::parse_api_error_response(json);
 
-  REQUIRE_FALSE(parsed.has_value());
-  CHECK(parsed.error().kind == gsheetpp::GoogleSheetsErrorKind::api_response);
-  CHECK(parsed.error().http_status == 403);
-  CHECK(parsed.error().response_body == json);
+  REQUIRE(parsed.has_value());
+  CHECK(*parsed == "The caller does not have permission");
 }
 
 TEST_CASE("jwt assertion contains required claims", "[jwt]") {
@@ -315,6 +378,84 @@ TEST_CASE("network failures surface as network errors", "[client]") {
 
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::network);
+}
+
+TEST_CASE("read_values_async falls back to generic http error for malformed API error payload",
+          "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key = make_test_private_key(),
+      .token_uri = "https://oauth2.googleapis.com/token",
+      .project_id = "demo-project",
+  };
+
+  auto client = gsheetpp::detail::make_google_sheets_client_for_test(
+      config,
+      [](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 403,
+            .body = "forbidden",
+        };
+      });
+
+  auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::http);
+  CHECK(result.error().message == "google sheets request failed");
+  CHECK(result.error().http_status == 403);
+  CHECK(result.error().response_body == "forbidden");
+}
+
+TEST_CASE("failed authenticate_async does not block the next token fetch", "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key = make_test_private_key(),
+      .token_uri = "https://oauth2.googleapis.com/token",
+      .project_id = "demo-project",
+  };
+  auto token_requests = 0;
+
+  auto client = gsheetpp::detail::make_google_sheets_client_for_test(
+      config,
+      [&](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          ++token_requests;
+          if (token_requests == 1) {
+            return gsheetpp::detail::HttpResponse{
+                .status_code = 200,
+                .body = "{",
+            };
+          }
+
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body = R"({"range":"Sheet1!A1:B2","majorDimension":"ROWS","values":[["a","b"]]})",
+        };
+      });
+
+  auto auth_result = client.authenticate_async().get();
+  auto read_result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE_FALSE(auth_result.has_value());
+  CHECK(auth_result.error().kind == gsheetpp::GoogleSheetsErrorKind::serialization);
+  REQUIRE(read_result.has_value());
+  CHECK(token_requests == 2);
 }
 
 TEST_CASE("concurrent reads share one token refresh", "[client]") {
