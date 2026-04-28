@@ -132,7 +132,7 @@ private:
    * @param values 書き込むセル値一覧です。
    * @return JSON 文字列です。
    */
-  auto build_write_values_request_body(std::vector<std::vector<std::string>> const& values) -> std::string;
+  auto build_write_values_request_body(std::span<std::vector<std::string> const> values) -> std::string;
 
   /**
    * @brief values API エンドポイント URL を組み立てます。

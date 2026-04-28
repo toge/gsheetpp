@@ -73,14 +73,6 @@ namespace {
   };
 
   /**
-   * @brief values.update 用 JSON 本文を組み立てるための一時構造体です。
-   */
-  struct WriteValuesRequestPayload {
-    std::string                           majorDimension{"ROWS"};
-    std::vector<std::vector<std::string>> values{};
-  };
-
-  /**
    * @brief JSON 解析失敗を表すエラーを組み立てます。
    * @param message 返したい失敗理由です。
    * @return serialization 種別のエラーです。
@@ -634,13 +626,13 @@ namespace detail {
    * @param values 書き込むセル値一覧です。
    * @return JSON 本文です。
    */
-  auto build_write_values_request_body(std::vector<std::vector<std::string>> const& values) -> std::string {
-    auto payload = WriteValuesRequestPayload{
-        .majorDimension = "ROWS",
-        .values         = values,
-    };
-    auto json   = std::string{};
-    std::ignore = glz::write_json(payload, json);
+  auto build_write_values_request_body(std::span<std::vector<std::string> const> values) -> std::string {
+    auto json = std::string{};
+    std::ignore = glz::write_json(glz::obj{
+                     "majorDimension", "ROWS",
+                     "values", values,
+                 },
+                 json);
     return json;
   }
 

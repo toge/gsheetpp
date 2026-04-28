@@ -320,6 +320,19 @@ TEST_CASE("write values request body serializes values and major dimension", "[r
   CHECK(body.find("\"456\"") != std::string::npos);
 }
 
+TEST_CASE("write values request body accepts span without copying rows", "[requests]") {
+  auto const values = std::vector<std::vector<std::string>>{
+      {"demo", "123"},
+      {"next", "456"},
+  };
+
+  auto const body = gsheetpp::detail::build_write_values_request_body(std::span<std::vector<std::string> const>{values.data(), values.size()});
+
+  CHECK(body.find("\"majorDimension\":\"ROWS\"") != std::string::npos);
+  CHECK(body.find("\"demo\"") != std::string::npos);
+  CHECK(body.find("\"456\"") != std::string::npos);
+}
+
 /**
  * @brief サービスアカウント利用時のクライアント挙動を検証します。
  */
