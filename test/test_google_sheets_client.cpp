@@ -295,6 +295,18 @@ TEST_CASE("token request body includes JWT bearer grant type", "[requests]") {
   CHECK(body.find("assertion=signed.jwt.token") != std::string::npos);
 }
 
+TEST_CASE("values URL percent-encodes spreadsheet id and range", "[requests]") {
+  auto const url = gsheetpp::detail::build_values_url("spreadsheet/id", "Sheet1!A1:B2", "valueInputOption=RAW");
+
+  CHECK(url == "https://sheets.googleapis.com/v4/spreadsheets/spreadsheet%2Fid/values/Sheet1%21A1%3AB2?valueInputOption=RAW");
+}
+
+TEST_CASE("append query parameter percent-encodes key and value", "[requests]") {
+  auto const url = gsheetpp::detail::append_query_parameter("https://example.com/path?existing=1", "api key", "value with space");
+
+  CHECK(url == "https://example.com/path?existing=1&api%20key=value%20with%20space");
+}
+
 TEST_CASE("write values request body serializes values and major dimension", "[requests]") {
   auto const values = std::vector<std::vector<std::string>>{
       {"demo", "123"},

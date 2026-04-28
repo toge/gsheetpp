@@ -139,27 +139,35 @@ namespace {
   }
 
   /**
+   * @brief URL / フォーム本文向けに文字列を percent-encode して既存文字列へ追記します。
+   * @param input 変換対象文字列です。
+   * @param out 追記先文字列です。
+   */
+  auto percent_encode(std::string_view input, std::string& out) -> void {
+    auto constexpr hex = "0123456789ABCDEF";
+    out.reserve(out.size() + input.size() * 3);
+
+    for (auto const ch : input) {
+      auto const byte = static_cast<unsigned char>(ch);
+      if (std::isalnum(byte) != 0 || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+        out.push_back(static_cast<char>(ch));
+        continue;
+      }
+
+      out.push_back('%');
+      out.push_back(hex[(byte >> 4U) & 0x0FU]);
+      out.push_back(hex[byte & 0x0FU]);
+    }
+  }
+
+  /**
    * @brief URL / フォーム本文向けに文字列を percent-encode します。
    * @param input 変換対象文字列です。
    * @return RFC 3986 互換のエンコード結果です。
    */
   auto percent_encode(std::string_view input) -> std::string {
-    auto encoded       = std::string{};
-    auto constexpr hex = "0123456789ABCDEF";
-    encoded.reserve(input.size() * 3);
-
-    for (auto const ch : input) {
-      auto const byte = static_cast<unsigned char>(ch);
-      if (std::isalnum(byte) != 0 || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
-        encoded.push_back(static_cast<char>(ch));
-        continue;
-      }
-
-      encoded.push_back('%');
-      encoded.push_back(hex[(byte >> 4U) & 0x0FU]);
-      encoded.push_back(hex[byte & 0x0FU]);
-    }
-
+    auto encoded = std::string{};
+    percent_encode(input, encoded);
     return encoded;
   }
 
@@ -644,7 +652,12 @@ namespace detail {
    * @return 組み立て済み URL です。
    */
   auto build_values_url(std::string_view spreadsheet_id, std::string_view range, std::string_view query) -> std::string {
-    auto url = std::format("https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}", percent_encode(spreadsheet_id), percent_encode(range));
+    auto url = std::string{"https://sheets.googleapis.com/v4/spreadsheets/"};
+    url.reserve(url.size() + (spreadsheet_id.size() * 3) + std::string_view{"/values/"}.size() + (range.size() * 3)
+                + (query.empty() ? std::size_t{0} : (std::size_t{1} + query.size())));
+    percent_encode(spreadsheet_id, url);
+    url += "/values/";
+    percent_encode(range, url);
     if (!query.empty()) {
       url += '?';
       url += query;
@@ -660,8 +673,11 @@ namespace detail {
    * @return 更新後 URL です。
    */
   auto append_query_parameter(std::string url, std::string_view key, std::string_view value) -> std::string {
+    url.reserve(url.size() + 1 + (key.size() * 3) + 1 + (value.size() * 3));
     url += (url.find('?') == std::string::npos) ? '?' : '&';
-    url += std::format("{}={}", percent_encode(key), percent_encode(value));
+    percent_encode(key, url);
+    url += '=';
+    percent_encode(value, url);
     return url;
   }
 
