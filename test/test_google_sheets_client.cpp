@@ -196,6 +196,26 @@ TEST_CASE("token response ignores unknown fields", "[responses]") {
   CHECK(parsed->expires_in_seconds == 3600);
 }
 
+TEST_CASE("oauth token response preserves refresh token and ignores unknown fields", "[responses]") {
+  auto const json = R"({
+    "access_token":"oauth-token",
+    "token_type":"Bearer",
+    "expires_in":3600,
+    "refresh_token":"refresh-123",
+    "scope":"https://www.googleapis.com/auth/spreadsheets",
+    "unexpected":"value"
+  })";
+
+  auto parsed = gsheetpp::detail::parse_oauth_token_response(json);
+
+  REQUIRE(parsed.has_value());
+  CHECK(parsed->token.access_token == "oauth-token");
+  CHECK(parsed->token.token_type == "Bearer");
+  CHECK(parsed->token.expires_in_seconds == 3600);
+  REQUIRE(parsed->refresh_token.has_value());
+  CHECK(*parsed->refresh_token == "refresh-123");
+}
+
 TEST_CASE("token error response is parsed into authentication error", "[responses]") {
   auto const json = R"({
     "error":"invalid_grant",

@@ -407,10 +407,12 @@ auto BasicGoogleSheetsClient<Auth>::execute_request(detail::HttpRequest request,
   if constexpr (std::same_as<Auth, UserOAuth2Auth>) {
     if (retry_on_unauthorized && response->status_code == 401) {
       // 失効したアクセストークンを控えておくことで、他スレッドが先に refresh 済みかどうかを判断できます。
-      auto failed_access_token = std::string_view{};
+      auto constexpr authorization_bearer_prefix = std::string_view{"Authorization: Bearer "};
+      auto           failed_access_token         = std::string_view{};
       for (auto const& header : request.headers) {
-        if (header.starts_with("Authorization: Bearer ")) {
-          failed_access_token = std::string_view{header}.substr(std::string_view{"Authorization: Bearer "}.size());
+        auto const header_view = std::string_view{header};
+        if (header_view.starts_with(authorization_bearer_prefix)) {
+          failed_access_token = header_view.substr(authorization_bearer_prefix.size());
           break;
         }
       }
@@ -421,18 +423,21 @@ auto BasicGoogleSheetsClient<Auth>::execute_request(detail::HttpRequest request,
       }
 
       // 元リクエストの Authorization ヘッダーだけ差し替え、同一条件で 1 回だけ再送します。
-      auto       retry_request = std::move(request);
-      auto const replacement   = std::string{"Authorization: Bearer " + refreshed->access_token};
-      auto       replaced      = false;
+      auto retry_request = std::move(request);
+      auto replaced      = false;
       for (auto& header : retry_request.headers) {
-        if (header.starts_with("Authorization: Bearer ")) {
-          header   = replacement;
+        auto const header_view = std::string_view{header};
+        if (header_view.starts_with(authorization_bearer_prefix)) {
+          header.resize(authorization_bearer_prefix.size());
+          header += refreshed->access_token;
           replaced = true;
           break;
         }
       }
       if (!replaced) {
-        retry_request.headers.push_back(replacement);
+        auto header = std::string{authorization_bearer_prefix};
+        header += refreshed->access_token;
+        retry_request.headers.push_back(std::move(header));
       }
 
       auto retry_response = send_request(retry_request);

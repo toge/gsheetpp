@@ -15,6 +15,50 @@
  * @brief Google Sheets クライアントの内部処理を実装します。
  */
 
+namespace glz {
+
+template <>
+struct meta<gsheetpp::TokenInfo> {
+  using T = gsheetpp::TokenInfo;
+
+  static constexpr auto value = object(
+      "access_token", &T::access_token,
+      "token_type", &T::token_type,
+      "expires_in", &T::expires_in_seconds);
+};
+
+template <>
+struct meta<gsheetpp::detail::OAuthTokenResponse> {
+  using T = gsheetpp::detail::OAuthTokenResponse;
+
+  static constexpr auto read_access_token = [](T& value, std::string const& input) {
+    value.token.access_token = input;
+  };
+  static constexpr auto write_access_token = [](T const& value) -> std::string const& {
+    return value.token.access_token;
+  };
+  static constexpr auto read_token_type = [](T& value, std::string const& input) {
+    value.token.token_type = input;
+  };
+  static constexpr auto write_token_type = [](T const& value) -> std::string const& {
+    return value.token.token_type;
+  };
+  static constexpr auto read_expires_in = [](T& value, long input) {
+    value.token.expires_in_seconds = input;
+  };
+  static constexpr auto write_expires_in = [](T const& value) -> long {
+    return value.token.expires_in_seconds;
+  };
+
+  static constexpr auto value = object(
+      "access_token", custom<read_access_token, write_access_token>,
+      "token_type", custom<read_token_type, write_token_type>,
+      "expires_in", custom<read_expires_in, write_expires_in>,
+      "refresh_token", &T::refresh_token);
+};
+
+}  // namespace glz
+
 namespace gsheetpp {
 
 namespace {
@@ -24,16 +68,6 @@ namespace {
    */
   auto constexpr ignore_unknown_keys_opts = glz::opts{
       .error_on_unknown_keys = false,
-  };
-
-  /**
-   * @brief Google OAuth2 / service account の token 応答を受ける一時構造体です。
-   */
-  struct TokenResponsePayload {
-    std::string                access_token{};
-    std::string                token_type{};
-    long                       expires_in{};
-    std::optional<std::string> refresh_token{};
   };
 
   /**
@@ -470,16 +504,7 @@ namespace detail {
    * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
    */
   auto parse_token_response(std::string_view json) -> std::expected<TokenInfo, GoogleSheetsError> {
-    auto payload = parse_json<TokenResponsePayload>(json, "failed to parse token response");
-    if (!payload) {
-      return std::unexpected{payload.error()};
-    }
-
-    return TokenInfo{
-        .access_token       = std::move(payload->access_token),
-        .token_type         = std::move(payload->token_type),
-        .expires_in_seconds = payload->expires_in,
-    };
+    return parse_json<TokenInfo>(json, "failed to parse token response");
   }
 
   /**
@@ -488,20 +513,7 @@ namespace detail {
    * @return 成功時は OAuthTokenResponse、失敗時は GoogleSheetsError です。
    */
   auto parse_oauth_token_response(std::string_view json) -> std::expected<OAuthTokenResponse, GoogleSheetsError> {
-    auto payload = parse_json<TokenResponsePayload>(json, "failed to parse OAuth token response");
-    if (!payload) {
-      return std::unexpected{payload.error()};
-    }
-
-    return OAuthTokenResponse{
-        .token =
-            TokenInfo{
-                .access_token       = std::move(payload->access_token),
-                .token_type         = std::move(payload->token_type),
-                .expires_in_seconds = payload->expires_in,
-            },
-        .refresh_token = std::move(payload->refresh_token),
-    };
+    return parse_json<OAuthTokenResponse>(json, "failed to parse OAuth token response");
   }
 
   /**
