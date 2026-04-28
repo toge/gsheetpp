@@ -41,6 +41,7 @@ save-commands.json
 .ccls-cache
 .cache
 .vscode
+.worktrees
 
 compile_commands.json
 
@@ -56,3 +57,4 @@ test.sh
 
 images*
 vcpkg_installed
+docs/superpowers

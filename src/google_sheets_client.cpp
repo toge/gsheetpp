@@ -10,339 +10,432 @@
 #include <format>
 #include <tuple>
 
+/**
+ * @file google_sheets_client.cpp
+ * @brief Google Sheets クライアントの内部処理を実装します。
+ */
+
 namespace gsheetpp {
 
 namespace {
 
-auto constexpr ignore_unknown_keys_opts = glz::opts{
-    .error_on_unknown_keys = false,
-};
-
-struct TokenResponsePayload {
-  std::string access_token{};
-  std::string token_type{};
-  long expires_in{};
-  std::optional<std::string> refresh_token{};
-};
-
-struct ReadValuesPayload {
-  std::string range{};
-  std::string majorDimension{};
-  std::vector<std::vector<std::string>> values{};
-};
-
-struct WriteValuesPayload {
-  std::string spreadsheetId{};
-  std::string updatedRange{};
-  long updatedRows{};
-  long updatedColumns{};
-  long updatedCells{};
-};
-
-struct GoogleApiErrorStatus {
-  long code{};
-  std::string message{};
-  std::string status{};
-};
-
-struct GoogleApiErrorPayload {
-  GoogleApiErrorStatus error{};
-};
-
-struct WriteValuesRequestPayload {
-  std::string majorDimension{"ROWS"};
-  std::vector<std::vector<std::string>> values{};
-};
-
-auto make_parse_error(std::string_view message) -> GoogleSheetsError {
-  return GoogleSheetsError{
-      .kind = GoogleSheetsErrorKind::serialization,
-      .message = std::string{message},
+  /**
+   * @brief Google の応答 JSON に未知キーが含まれても失敗させない設定です。
+   */
+  auto constexpr ignore_unknown_keys_opts = glz::opts{
+      .error_on_unknown_keys = false,
   };
-}
 
-auto make_configuration_error(std::string_view message) -> GoogleSheetsError {
-  return GoogleSheetsError{
-      .kind = GoogleSheetsErrorKind::configuration,
-      .message = std::string{message},
+  /**
+   * @brief Google OAuth2 / service account の token 応答を受ける一時構造体です。
+   */
+  struct TokenResponsePayload {
+    std::string                access_token{};
+    std::string                token_type{};
+    long                       expires_in{};
+    std::optional<std::string> refresh_token{};
   };
-}
 
-auto make_http_error(
-    GoogleSheetsErrorKind kind,
-    std::string_view message,
-    long http_status,
-    std::string_view response_body) -> GoogleSheetsError {
-  return GoogleSheetsError{
-      .kind = kind,
-      .message = std::string{message},
-      .http_status = http_status,
-      .response_body = std::string{response_body},
+  /**
+   * @brief values.get 応答 JSON を受ける一時構造体です。
+   */
+  struct ReadValuesPayload {
+    std::string                           range{};
+    std::string                           majorDimension{};
+    std::vector<std::vector<std::string>> values{};
   };
-}
 
-template <class T>
-auto parse_json(std::string_view json, std::string_view message)
-    -> std::expected<T, GoogleSheetsError> {
-  auto value = T{};
-  auto const json_buffer = std::string{json};
-  if (auto const ec = glz::read<ignore_unknown_keys_opts>(value, json_buffer)) {
-    return std::unexpected{make_parse_error(message)};
+  /**
+   * @brief values.update 応答 JSON を受ける一時構造体です。
+   */
+  struct WriteValuesPayload {
+    std::string spreadsheetId{};
+    std::string updatedRange{};
+    long        updatedRows{};
+    long        updatedColumns{};
+    long        updatedCells{};
+  };
+
+  /**
+   * @brief Google API 標準エラーの内部 `error` オブジェクトです。
+   */
+  struct GoogleApiErrorStatus {
+    long        code{};
+    std::string message{};
+    std::string status{};
+  };
+
+  /**
+   * @brief Google API 標準エラー応答全体です。
+   */
+  struct GoogleApiErrorPayload {
+    GoogleApiErrorStatus error{};
+  };
+
+  /**
+   * @brief values.update 用 JSON 本文を組み立てるための一時構造体です。
+   */
+  struct WriteValuesRequestPayload {
+    std::string                           majorDimension{"ROWS"};
+    std::vector<std::vector<std::string>> values{};
+  };
+
+  /**
+   * @brief JSON 解析失敗を表すエラーを組み立てます。
+   * @param message 返したい失敗理由です。
+   * @return serialization 種別のエラーです。
+   */
+  auto make_parse_error(std::string_view message) -> GoogleSheetsError {
+    return GoogleSheetsError{
+        .kind    = GoogleSheetsErrorKind::serialization,
+        .message = std::string{message},
+    };
   }
-  return value;
-}
 
-auto percent_encode(std::string_view input) -> std::string {
-  auto encoded = std::string{};
-  auto constexpr hex = "0123456789ABCDEF";
-  encoded.reserve(input.size() * 3);
+  /**
+   * @brief 構成値エラーを組み立てます。
+   * @param message 返したい失敗理由です。
+   * @return configuration 種別のエラーです。
+   */
+  auto make_configuration_error(std::string_view message) -> GoogleSheetsError {
+    return GoogleSheetsError{
+        .kind    = GoogleSheetsErrorKind::configuration,
+        .message = std::string{message},
+    };
+  }
 
-  for (auto const ch : input) {
-    auto const byte = static_cast<unsigned char>(ch);
-    if (std::isalnum(byte) != 0 || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
-      encoded.push_back(static_cast<char>(ch));
-      continue;
+  /**
+   * @brief HTTP 応答由来のエラーを共通形式で組み立てます。
+   * @param kind 返すエラー種別です。
+   * @param message 返したい失敗理由です。
+   * @param http_status HTTP ステータスです。
+   * @param response_body 生レスポンス本文です。
+   * @return 指定内容を詰めた GoogleSheetsError です。
+   */
+  auto make_http_error(GoogleSheetsErrorKind kind, std::string_view message, long http_status, std::string_view response_body) -> GoogleSheetsError {
+    return GoogleSheetsError{
+        .kind          = kind,
+        .message       = std::string{message},
+        .http_status   = http_status,
+        .response_body = std::string{response_body},
+    };
+  }
+
+  template <class T>
+  /**
+   * @brief JSON を指定型へデシリアライズします。
+   * @tparam T 変換先型です。
+   * @param json 解析対象 JSON 文字列です。
+   * @param message 失敗時に返すエラーメッセージです。
+   * @return 成功時は T、失敗時は GoogleSheetsError です。
+   */
+  auto parse_json(std::string_view json, std::string_view message) -> std::expected<T, GoogleSheetsError> {
+    auto       value       = T{};
+    auto const json_buffer = std::string{json};
+    if (auto const ec = glz::read<ignore_unknown_keys_opts>(value, json_buffer)) {
+      return std::unexpected{make_parse_error(message)};
+    }
+    return value;
+  }
+
+  /**
+   * @brief URL / フォーム本文向けに文字列を percent-encode します。
+   * @param input 変換対象文字列です。
+   * @return RFC 3986 互換のエンコード結果です。
+   */
+  auto percent_encode(std::string_view input) -> std::string {
+    auto encoded       = std::string{};
+    auto constexpr hex = "0123456789ABCDEF";
+    encoded.reserve(input.size() * 3);
+
+    for (auto const ch : input) {
+      auto const byte = static_cast<unsigned char>(ch);
+      if (std::isalnum(byte) != 0 || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+        encoded.push_back(static_cast<char>(ch));
+        continue;
+      }
+
+      encoded.push_back('%');
+      encoded.push_back(hex[(byte >> 4U) & 0x0FU]);
+      encoded.push_back(hex[byte & 0x0FU]);
     }
 
-    encoded.push_back('%');
-    encoded.push_back(hex[(byte >> 4U) & 0x0FU]);
-    encoded.push_back(hex[byte & 0x0FU]);
+    return encoded;
   }
 
-  return encoded;
-}
-
-auto now_or_default(detail::ClockFunction const& clock)
-    -> std::chrono::system_clock::time_point {
-  if (clock) {
-    return clock();
-  }
-  return std::chrono::system_clock::now();
-}
-
-auto token_is_valid(
-    std::shared_ptr<detail::ClientSharedState> const& shared_state,
-    detail::ClockFunction const& clock) -> bool {
-  auto const now = now_or_default(clock);
-  return shared_state->token.has_value() &&
-         (shared_state->expires_at - std::chrono::seconds{30} > now);
-}
-
-auto store_token(
-    std::shared_ptr<detail::ClientSharedState> const& shared_state,
-    TokenInfo const& token,
-    std::chrono::system_clock::time_point issued_at) -> void {
-  auto _ = std::scoped_lock{shared_state->mutex};
-  shared_state->token = token;
-  shared_state->expires_at = issued_at + std::chrono::seconds{token.expires_in_seconds};
-}
-
-template <class Fetch>
-auto get_or_refresh_token(
-    std::shared_ptr<detail::ClientSharedState> const& shared_state,
-    detail::ClockFunction const& clock,
-    Fetch&& fetch) -> std::expected<TokenInfo, GoogleSheetsError> {
-  auto lock = std::unique_lock{shared_state->mutex};
-  while (shared_state->refresh_in_progress) {
-    shared_state->cv.wait(lock);
+  /**
+   * @brief clock が注入されていればそれを、なければ system_clock の現在時刻を返します。
+   * @param clock 任意の現在時刻関数です。
+   * @return 現在時刻です。
+   */
+  auto now_or_default(detail::ClockFunction const& clock) -> std::chrono::system_clock::time_point {
+    if (clock) {
+      return clock();
+    }
+    return std::chrono::system_clock::now();
   }
 
-  if (token_is_valid(shared_state, clock)) {
-    return *shared_state->token;
+  /**
+   * @brief 共有キャッシュ中のアクセストークンがまだ安全に使えるか判定します。
+   * @param shared_state 共有トークン状態です。
+   * @param clock 現在時刻関数です。
+   * @return true の場合は refresh 不要です。
+   */
+  auto token_is_valid(std::shared_ptr<detail::ClientSharedState> const& shared_state, detail::ClockFunction const& clock) -> bool {
+    auto const now = now_or_default(clock);
+    return shared_state->token.has_value() && (shared_state->expires_at - std::chrono::seconds{30} > now);
   }
 
-  shared_state->refresh_in_progress = true;
-  lock.unlock();
+  /**
+   * @brief 取得済みトークンを共有キャッシュへ保存します。
+   * @param shared_state 共有トークン状態です。
+   * @param token 保存するトークンです。
+   * @param issued_at 発行基準時刻です。
+   */
+  auto store_token(std::shared_ptr<detail::ClientSharedState> const& shared_state, TokenInfo const& token, std::chrono::system_clock::time_point issued_at) -> void {
+    auto _                   = std::scoped_lock{shared_state->mutex};
+    shared_state->token      = token;
+    shared_state->expires_at = issued_at + std::chrono::seconds{token.expires_in_seconds};
+  }
 
-  auto guard = detail::RefreshInProgressGuard{
-      shared_state->mutex,
-      shared_state->cv,
-      shared_state->refresh_in_progress,
-  };
-  return fetch();
-}
-
-template <class Fetch>
-auto force_refresh(
-    std::shared_ptr<detail::ClientSharedState> const& shared_state,
-    detail::ClockFunction const& clock,
-    std::string_view failed_access_token,
-    Fetch&& fetch) -> std::expected<TokenInfo, GoogleSheetsError> {
-  {
+  template <class Fetch>
+  /**
+   * @brief 共有キャッシュを見て必要時のみトークン取得処理を 1 本化します。
+   * @tparam Fetch 実際の取得処理を表す callable です。
+   * @param shared_state 共有トークン状態です。
+   * @param clock 現在時刻関数です。
+   * @param fetch 実際に新しい token を取りに行く処理です。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto get_or_refresh_token(std::shared_ptr<detail::ClientSharedState> const& shared_state, detail::ClockFunction const& clock, Fetch&& fetch) -> std::expected<TokenInfo, GoogleSheetsError> {
     auto lock = std::unique_lock{shared_state->mutex};
     while (shared_state->refresh_in_progress) {
       shared_state->cv.wait(lock);
     }
-    if (token_is_valid(shared_state, clock) && shared_state->token->access_token != failed_access_token) {
+
+    // 先行スレッドの refresh が終わっていれば、その結果をそのまま再利用します。
+    if (token_is_valid(shared_state, clock)) {
       return *shared_state->token;
     }
+
     shared_state->refresh_in_progress = true;
+    lock.unlock();
+
+    auto guard = detail::RefreshInProgressGuard{
+        shared_state->mutex,
+        shared_state->cv,
+        shared_state->refresh_in_progress,
+    };
+    return fetch();
   }
 
-  auto guard = detail::RefreshInProgressGuard{
-      shared_state->mutex,
-      shared_state->cv,
-      shared_state->refresh_in_progress,
-  };
-  return fetch();
-}
-
-auto perform_request(
-    detail::TransportFunction const& transport,
-    detail::HttpRequest const& request) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
-  if (!transport) {
-    return std::unexpected{GoogleSheetsError{
-        .kind = GoogleSheetsErrorKind::network,
-        .message = "transport is not configured",
-    }};
-  }
-  return transport(request);
-}
-
-auto fetch_service_account_token(
-    ServiceAccountConfig const& auth,
-    std::shared_ptr<detail::ClientSharedState> const& shared_state,
-    detail::TransportFunction const& transport,
-    detail::ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
-  auto const issued_at = now_or_default(clock);
-  auto assertion = detail::build_jwt_assertion(auth, issued_at);
-  if (!assertion) {
-    return std::unexpected{assertion.error()};
-  }
-
-  auto response = perform_request(
-      transport,
-      detail::HttpRequest{
-          .method = "POST",
-          .url = auth.token_uri,
-          .headers = {"Content-Type: application/x-www-form-urlencoded"},
-          .body = detail::build_token_request_body(assertion.value()),
-      });
-  if (!response) {
-    return std::unexpected{response.error()};
-  }
-  if (response->status_code >= 400) {
-    auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
-    return std::unexpected{auth_error.error()};
-  }
-
-  auto token = detail::parse_token_response(response->body);
-  if (!token) {
-    return std::unexpected{token.error()};
-  }
-
-  store_token(shared_state, *token, issued_at);
-  return token;
-}
-
-auto validate_user_oauth_config(UserOAuth2Auth const& auth)
-    -> std::expected<void, GoogleSheetsError> {
-  if (auth.client_id.empty()) {
-    return std::unexpected{make_configuration_error("client_id is required")};
-  }
-  if (auth.client_secret.empty()) {
-    return std::unexpected{make_configuration_error("client_secret is required")};
-  }
-  if (auth.token_uri.empty()) {
-    return std::unexpected{make_configuration_error("token_uri is required")};
-  }
-  if (auth.current_refresh_token().empty() && auth.authorization_code.empty()) {
-    return std::unexpected{GoogleSheetsError{
-        .kind = GoogleSheetsErrorKind::authentication,
-        .message = "user OAuth2 requires a refresh token or authorization code",
-    }};
-  }
-  if (auth.current_refresh_token().empty() && auth.redirect_uri.empty()) {
-    return std::unexpected{make_configuration_error("redirect_uri is required for authorization_code exchange")};
-  }
-  return {};
-}
-
-auto fetch_user_oauth_token(
-    UserOAuth2Auth& auth,
-    std::shared_ptr<detail::ClientSharedState> const& shared_state,
-    detail::TransportFunction const& transport,
-    detail::ClockFunction const& clock,
-    bool force_refresh_only) -> std::expected<TokenInfo, GoogleSheetsError> {
-  auto const validated = validate_user_oauth_config(auth);
-  if (!validated) {
-    return std::unexpected{validated.error()};
-  }
-  auto used_authorization_code = false;
-  auto const auth_refresh_token = auth.current_refresh_token();
-  auto refresh_token_snapshot = std::string{};
-  {
-    auto _ = std::scoped_lock{shared_state->mutex};
-    if (shared_state->refresh_token.has_value()) {
-      refresh_token_snapshot = *shared_state->refresh_token;
+  template <class Fetch>
+  /**
+   * @brief 401 後の強制 refresh を 1 本化します。
+   * @tparam Fetch 実際の refresh 処理を表す callable です。
+   * @param shared_state 共有トークン状態です。
+   * @param clock 現在時刻関数です。
+   * @param failed_access_token 失効していたアクセストークンです。
+   * @param fetch 実際に新しい token を取りに行く処理です。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto force_refresh(std::shared_ptr<detail::ClientSharedState> const& shared_state, detail::ClockFunction const& clock, std::string_view failed_access_token, Fetch&& fetch)
+      -> std::expected<TokenInfo, GoogleSheetsError> {
+    {
+      auto lock = std::unique_lock{shared_state->mutex};
+      while (shared_state->refresh_in_progress) {
+        shared_state->cv.wait(lock);
+      }
+      // 他スレッドがすでに別トークンへ更新済みなら、その結果をそのまま使います。
+      if (token_is_valid(shared_state, clock) && shared_state->token->access_token != failed_access_token) {
+        return *shared_state->token;
+      }
+      shared_state->refresh_in_progress = true;
     }
-    else if (!auth_refresh_token.empty()) {
-      shared_state->refresh_token = auth_refresh_token;
-      refresh_token_snapshot = auth_refresh_token;
+
+    auto guard = detail::RefreshInProgressGuard{
+        shared_state->mutex,
+        shared_state->cv,
+        shared_state->refresh_in_progress,
+    };
+    return fetch();
+  }
+
+  /**
+   * @brief transport が設定されていることを確認したうえで HTTP リクエストを投げます。
+   * @param transport HTTP 実行関数です。
+   * @param request 実行する HTTP リクエストです。
+   * @return 成功時は HttpResponse、失敗時は GoogleSheetsError です。
+   */
+  auto perform_request(detail::TransportFunction const& transport, detail::HttpRequest const& request) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
+    if (!transport) {
+      return std::unexpected{GoogleSheetsError{
+          .kind    = GoogleSheetsErrorKind::network,
+          .message = "transport is not configured",
+      }};
     }
-  }
-  if (!refresh_token_snapshot.empty() && refresh_token_snapshot != auth_refresh_token) {
-    auth.set_refresh_token(refresh_token_snapshot);
+    return transport(request);
   }
 
-  auto request_body = std::string{};
-  if (!refresh_token_snapshot.empty()) {
-    request_body = detail::build_oauth_refresh_request_body(auth, refresh_token_snapshot);
-  }
-  else if (!force_refresh_only && !auth.authorization_code.empty()) {
-    used_authorization_code = true;
-    request_body = detail::build_oauth_authorization_code_request_body(auth);
-  }
-  else {
-    return std::unexpected{GoogleSheetsError{
-        .kind = GoogleSheetsErrorKind::authentication,
-        .message = "user OAuth2 requires a refresh token or authorization code",
-    }};
+  /**
+   * @brief サービスアカウント認証でアクセストークンを取得します。
+   * @param auth サービスアカウント設定です。
+   * @param shared_state 共有トークン状態です。
+   * @param transport HTTP 実行関数です。
+   * @param clock 現在時刻関数です。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto fetch_service_account_token(ServiceAccountConfig const& auth, std::shared_ptr<detail::ClientSharedState> const& shared_state, detail::TransportFunction const& transport,
+                                   detail::ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
+    auto const issued_at = now_or_default(clock);
+    auto       assertion = detail::build_jwt_assertion(auth, issued_at);
+    if (!assertion) {
+      return std::unexpected{assertion.error()};
+    }
+
+    // サービスアカウントは JWT bearer grant で毎回アクセストークンを取得します。
+    auto response = perform_request(transport, detail::HttpRequest{
+                                                   .method  = "POST",
+                                                   .url     = auth.token_uri,
+                                                   .headers = {"Content-Type: application/x-www-form-urlencoded"},
+                                                   .body    = detail::build_token_request_body(assertion.value()),
+                                               });
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
+      return std::unexpected{auth_error.error()};
+    }
+
+    auto token = detail::parse_token_response(response->body);
+    if (!token) {
+      return std::unexpected{token.error()};
+    }
+
+    store_token(shared_state, *token, issued_at);
+    return token;
   }
 
-  auto response = perform_request(
-      transport,
-      detail::HttpRequest{
-          .method = "POST",
-          .url = auth.token_uri,
-          .headers = {"Content-Type: application/x-www-form-urlencoded"},
-          .body = std::move(request_body),
-      });
-  if (!response) {
-    return std::unexpected{response.error()};
-  }
-  if (response->status_code >= 400) {
-    auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
-    return std::unexpected{auth_error.error()};
-  }
-
-  auto oauth_response = detail::parse_oauth_token_response(response->body);
-  if (!oauth_response) {
-    return std::unexpected{oauth_response.error()};
-  }
-
-  auto latest_refresh_token = std::optional<std::string>{};
-  if (oauth_response->refresh_token.has_value()) {
-    auto _ = std::scoped_lock{shared_state->mutex};
-    shared_state->refresh_token = *oauth_response->refresh_token;
-    latest_refresh_token = oauth_response->refresh_token;
-  }
-  if (latest_refresh_token.has_value()) {
-    auth.set_refresh_token(*latest_refresh_token);
-  }
-  if (used_authorization_code) {
-    auth.authorization_code.clear();
+  /**
+   * @brief User OAuth2 の構成値が token 取得に足るか検証します。
+   * @param auth OAuth2 認証設定です。
+   * @return 成功時は void、失敗時は GoogleSheetsError です。
+   */
+  auto validate_user_oauth_config(UserOAuth2Auth const& auth) -> std::expected<void, GoogleSheetsError> {
+    if (auth.client_id.empty()) {
+      return std::unexpected{make_configuration_error("client_id is required")};
+    }
+    if (auth.client_secret.empty()) {
+      return std::unexpected{make_configuration_error("client_secret is required")};
+    }
+    if (auth.token_uri.empty()) {
+      return std::unexpected{make_configuration_error("token_uri is required")};
+    }
+    if (auth.current_refresh_token().empty() && auth.authorization_code.empty()) {
+      return std::unexpected{GoogleSheetsError{
+          .kind    = GoogleSheetsErrorKind::authentication,
+          .message = "user OAuth2 requires a refresh token or authorization code",
+      }};
+    }
+    if (auth.current_refresh_token().empty() && auth.redirect_uri.empty()) {
+      return std::unexpected{make_configuration_error("redirect_uri is required for authorization_code exchange")};
+    }
+    return {};
   }
 
-  auto const issued_at = now_or_default(clock);
-  store_token(shared_state, oauth_response->token, issued_at);
-  return oauth_response->token;
-}
+  /**
+   * @brief User OAuth2 のアクセストークン取得または更新を行います。
+   * @param auth OAuth2 認証設定です。
+   * @param shared_state 共有トークン状態です。
+   * @param transport HTTP 実行関数です。
+   * @param clock 現在時刻関数です。
+   * @param force_refresh_only true の場合は authorization code 交換を禁止します。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto fetch_user_oauth_token(UserOAuth2Auth& auth, std::shared_ptr<detail::ClientSharedState> const& shared_state, detail::TransportFunction const& transport, detail::ClockFunction const& clock,
+                              bool force_refresh_only) -> std::expected<TokenInfo, GoogleSheetsError> {
+    auto const validated = validate_user_oauth_config(auth);
+    if (!validated) {
+      return std::unexpected{validated.error()};
+    }
+    auto       used_authorization_code = false;
+    auto const auth_refresh_token      = auth.current_refresh_token();
+    auto       refresh_token_snapshot  = std::string{};
+    {
+      // refresh token は shared_state 側を正としつつ、初回は authenticator 側から取り込みます。
+      auto _ = std::scoped_lock{shared_state->mutex};
+      if (shared_state->refresh_token.has_value()) {
+        refresh_token_snapshot = *shared_state->refresh_token;
+      } else if (!auth_refresh_token.empty()) {
+        shared_state->refresh_token = auth_refresh_token;
+        refresh_token_snapshot      = auth_refresh_token;
+      }
+    }
+    if (!refresh_token_snapshot.empty() && refresh_token_snapshot != auth_refresh_token) {
+      auth.set_refresh_token(refresh_token_snapshot);
+    }
+
+    auto request_body = std::string{};
+    // まず refresh token を優先し、なければ初回 bootstrap として authorization code を使います。
+    if (!refresh_token_snapshot.empty()) {
+      request_body = detail::build_oauth_refresh_request_body(auth, refresh_token_snapshot);
+    } else if (!force_refresh_only && !auth.authorization_code.empty()) {
+      used_authorization_code = true;
+      request_body            = detail::build_oauth_authorization_code_request_body(auth);
+    } else {
+      return std::unexpected{GoogleSheetsError{
+          .kind    = GoogleSheetsErrorKind::authentication,
+          .message = "user OAuth2 requires a refresh token or authorization code",
+      }};
+    }
+
+    auto response = perform_request(transport, detail::HttpRequest{
+                                                   .method  = "POST",
+                                                   .url     = auth.token_uri,
+                                                   .headers = {"Content-Type: application/x-www-form-urlencoded"},
+                                                   .body    = std::move(request_body),
+                                               });
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
+      return std::unexpected{auth_error.error()};
+    }
+
+    auto oauth_response = detail::parse_oauth_token_response(response->body);
+    if (!oauth_response) {
+      return std::unexpected{oauth_response.error()};
+    }
+
+    auto latest_refresh_token = std::optional<std::string>{};
+    if (oauth_response->refresh_token.has_value()) {
+      // Google が refresh token を再発行した場合は共有状態と authenticator の両方へ反映します。
+      auto _                      = std::scoped_lock{shared_state->mutex};
+      shared_state->refresh_token = *oauth_response->refresh_token;
+      latest_refresh_token        = oauth_response->refresh_token;
+    }
+    if (latest_refresh_token.has_value()) {
+      auth.set_refresh_token(*latest_refresh_token);
+    }
+    if (used_authorization_code) {
+      auth.authorization_code.clear();
+    }
+
+    auto const issued_at = now_or_default(clock);
+    store_token(shared_state, oauth_response->token, issued_at);
+    return oauth_response->token;
+  }
 
 }  // namespace
 
-auto parse_service_account_config(std::string_view json)
-    -> std::expected<ServiceAccountConfig, GoogleSheetsError> {
+/**
+ * @brief サービスアカウント JSON 文字列を構造化設定へ変換します。
+ * @param json サービスアカウント JSON 文字列です。
+ * @return 成功時は ServiceAccountConfig、失敗時は GoogleSheetsError です。
+ */
+auto parse_service_account_config(std::string_view json) -> std::expected<ServiceAccountConfig, GoogleSheetsError> {
   auto config = parse_json<ServiceAccountConfig>(json, "failed to parse service account JSON");
   if (!config) {
     return std::unexpected{config.error()};
@@ -363,216 +456,269 @@ auto parse_service_account_config(std::string_view json)
 
 namespace detail {
 
-auto default_transport() -> TransportFunction {
-  return [](HttpRequest const& request) {
-    return http::perform_http_request(request);
-  };
-}
-
-auto parse_token_response(std::string_view json)
-    -> std::expected<TokenInfo, GoogleSheetsError> {
-  auto payload = parse_json<TokenResponsePayload>(json, "failed to parse token response");
-  if (!payload) {
-    return std::unexpected{payload.error()};
+  /**
+   * @brief デフォルト transport を返します。
+   * @return libcurl ベース transport です。
+   */
+  auto default_transport() -> TransportFunction {
+    return [](HttpRequest const& request) { return http::perform_http_request(request); };
   }
 
-  return TokenInfo{
-      .access_token = std::move(payload->access_token),
-      .token_type = std::move(payload->token_type),
-      .expires_in_seconds = payload->expires_in,
-  };
-}
+  /**
+   * @brief サービスアカウント token 応答を TokenInfo に変換します。
+   * @param json token 応答 JSON です。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto parse_token_response(std::string_view json) -> std::expected<TokenInfo, GoogleSheetsError> {
+    auto payload = parse_json<TokenResponsePayload>(json, "failed to parse token response");
+    if (!payload) {
+      return std::unexpected{payload.error()};
+    }
 
-auto parse_oauth_token_response(std::string_view json)
-    -> std::expected<OAuthTokenResponse, GoogleSheetsError> {
-  auto payload = parse_json<TokenResponsePayload>(json, "failed to parse OAuth token response");
-  if (!payload) {
-    return std::unexpected{payload.error()};
+    return TokenInfo{
+        .access_token       = std::move(payload->access_token),
+        .token_type         = std::move(payload->token_type),
+        .expires_in_seconds = payload->expires_in,
+    };
   }
 
-  return OAuthTokenResponse{
-      .token = TokenInfo{
-          .access_token = std::move(payload->access_token),
-          .token_type = std::move(payload->token_type),
-          .expires_in_seconds = payload->expires_in,
-      },
-      .refresh_token = std::move(payload->refresh_token),
-  };
-}
+  /**
+   * @brief OAuth2 token 応答を access token と refresh token に変換します。
+   * @param json token 応答 JSON です。
+   * @return 成功時は OAuthTokenResponse、失敗時は GoogleSheetsError です。
+   */
+  auto parse_oauth_token_response(std::string_view json) -> std::expected<OAuthTokenResponse, GoogleSheetsError> {
+    auto payload = parse_json<TokenResponsePayload>(json, "failed to parse OAuth token response");
+    if (!payload) {
+      return std::unexpected{payload.error()};
+    }
 
-auto parse_token_error_response(std::string_view json, long http_status)
-    -> std::expected<void, GoogleSheetsError> {
-  return std::unexpected{make_http_error(
-      GoogleSheetsErrorKind::authentication,
-      "token request failed",
-      http_status,
-      json)};
-}
-
-auto parse_read_values_response(std::string_view json)
-    -> std::expected<ReadValuesResult, GoogleSheetsError> {
-  auto payload = parse_json<ReadValuesPayload>(json, "failed to parse read values response");
-  if (!payload) {
-    return std::unexpected{payload.error()};
+    return OAuthTokenResponse{
+        .token =
+            TokenInfo{
+                .access_token       = std::move(payload->access_token),
+                .token_type         = std::move(payload->token_type),
+                .expires_in_seconds = payload->expires_in,
+            },
+        .refresh_token = std::move(payload->refresh_token),
+    };
   }
 
-  return ReadValuesResult{
-      .range = std::move(payload->range),
-      .major_dimension = std::move(payload->majorDimension),
-      .values = std::move(payload->values),
-  };
-}
-
-auto parse_write_values_response(std::string_view json)
-    -> std::expected<WriteValuesResult, GoogleSheetsError> {
-  auto payload = parse_json<WriteValuesPayload>(json, "failed to parse write values response");
-  if (!payload) {
-    return std::unexpected{payload.error()};
+  /**
+   * @brief token 取得失敗を authentication エラーとして返します。
+   * @param json 失敗応答本文です。
+   * @param http_status HTTP ステータスです。
+   * @return 常に失敗 expected を返します。
+   */
+  auto parse_token_error_response(std::string_view json, long http_status) -> std::expected<void, GoogleSheetsError> {
+    return std::unexpected{make_http_error(GoogleSheetsErrorKind::authentication, "token request failed", http_status, json)};
   }
 
-  return WriteValuesResult{
-      .spreadsheet_id = std::move(payload->spreadsheetId),
-      .updated_range = std::move(payload->updatedRange),
-      .updated_rows = payload->updatedRows,
-      .updated_columns = payload->updatedColumns,
-      .updated_cells = payload->updatedCells,
-  };
-}
+  /**
+   * @brief values.get 応答を ReadValuesResult に変換します。
+   * @param json 応答 JSON です。
+   * @return 成功時は ReadValuesResult、失敗時は GoogleSheetsError です。
+   */
+  auto parse_read_values_response(std::string_view json) -> std::expected<ReadValuesResult, GoogleSheetsError> {
+    auto payload = parse_json<ReadValuesPayload>(json, "failed to parse read values response");
+    if (!payload) {
+      return std::unexpected{payload.error()};
+    }
 
-auto parse_api_error_response(std::string_view json)
-    -> std::expected<std::string, GoogleSheetsError> {
-  auto payload = parse_json<GoogleApiErrorPayload>(json, "failed to parse API error response");
-  if (!payload) {
-    return std::unexpected{payload.error()};
+    return ReadValuesResult{
+        .range           = std::move(payload->range),
+        .major_dimension = std::move(payload->majorDimension),
+        .values          = std::move(payload->values),
+    };
   }
 
-  return std::move(payload->error.message);
-}
+  /**
+   * @brief values.update 応答を WriteValuesResult に変換します。
+   * @param json 応答 JSON です。
+   * @return 成功時は WriteValuesResult、失敗時は GoogleSheetsError です。
+   */
+  auto parse_write_values_response(std::string_view json) -> std::expected<WriteValuesResult, GoogleSheetsError> {
+    auto payload = parse_json<WriteValuesPayload>(json, "failed to parse write values response");
+    if (!payload) {
+      return std::unexpected{payload.error()};
+    }
 
-auto build_jwt_assertion(
-    ServiceAccountConfig const& config,
-    std::chrono::system_clock::time_point issued_at)
-    -> std::expected<std::string, GoogleSheetsError> {
-  try {
-    auto const token = jwt::create()
-                           .set_type("JWT")
-                           .set_issuer(config.client_email)
-                           .set_audience(config.token_uri)
-                           .set_issued_at(issued_at)
-                           .set_expires_at(issued_at + std::chrono::hours{1})
-                           .set_payload_claim(
-                               "scope",
-                               jwt::claim(std::string{
-                                   "https://www.googleapis.com/auth/spreadsheets"}))
-                           .sign(jwt::algorithm::rs256("", config.private_key));
-    return token;
+    return WriteValuesResult{
+        .spreadsheet_id  = std::move(payload->spreadsheetId),
+        .updated_range   = std::move(payload->updatedRange),
+        .updated_rows    = payload->updatedRows,
+        .updated_columns = payload->updatedColumns,
+        .updated_cells   = payload->updatedCells,
+    };
   }
-  catch (std::exception const& ex) {
-    return std::unexpected{GoogleSheetsError{
-        .kind = GoogleSheetsErrorKind::jwt_signing,
-        .message = ex.what(),
-    }};
+
+  /**
+   * @brief Google API 標準エラー応答から message を抽出します。
+   * @param json エラー応答 JSON です。
+   * @return 成功時は message、失敗時は GoogleSheetsError です。
+   */
+  auto parse_api_error_response(std::string_view json) -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = parse_json<GoogleApiErrorPayload>(json, "failed to parse API error response");
+    if (!payload) {
+      return std::unexpected{payload.error()};
+    }
+
+    return std::move(payload->error.message);
   }
-}
 
-auto build_token_request_body(std::string_view assertion) -> std::string {
-  return std::format(
-      "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
-      percent_encode(assertion));
-}
-
-auto build_oauth_authorization_code_request_body(UserOAuth2Auth const& auth) -> std::string {
-  return std::format(
-      "client_id={}&client_secret={}&redirect_uri={}&code={}&grant_type=authorization_code",
-      percent_encode(auth.client_id),
-      percent_encode(auth.client_secret),
-      percent_encode(auth.redirect_uri),
-      percent_encode(auth.authorization_code));
-}
-
-auto build_oauth_refresh_request_body(UserOAuth2Auth const& auth, std::string_view refresh_token)
-    -> std::string {
-  return std::format(
-      "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
-      percent_encode(auth.client_id),
-      percent_encode(auth.client_secret),
-      percent_encode(refresh_token));
-}
-
-auto build_write_values_request_body(std::vector<std::vector<std::string>> const& values)
-    -> std::string {
-  auto payload = WriteValuesRequestPayload{
-      .majorDimension = "ROWS",
-      .values = values,
-  };
-  auto json = std::string{};
-  std::ignore = glz::write_json(payload, json);
-  return json;
-}
-
-auto build_values_url(
-    std::string_view spreadsheet_id,
-    std::string_view range,
-    std::string_view query) -> std::string {
-  auto url = std::format(
-      "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
-      percent_encode(spreadsheet_id),
-      percent_encode(range));
-  if (!query.empty()) {
-    url += '?';
-    url += query;
+  /**
+   * @brief サービスアカウント認証用 JWT assertion を生成します。
+   * @param config サービスアカウント設定です。
+   * @param issued_at iat / exp の基準時刻です。
+   * @return 成功時は署名済み JWT、失敗時は GoogleSheetsError です。
+   */
+  auto build_jwt_assertion(ServiceAccountConfig const& config, std::chrono::system_clock::time_point issued_at) -> std::expected<std::string, GoogleSheetsError> {
+    try {
+      // Google Sheets API の service account フローに必要な固定 scope を claim に載せます。
+      auto const token = jwt::create()
+                             .set_type("JWT")
+                             .set_issuer(config.client_email)
+                             .set_audience(config.token_uri)
+                             .set_issued_at(issued_at)
+                             .set_expires_at(issued_at + std::chrono::hours{1})
+                             .set_payload_claim("scope", jwt::claim(std::string{"https://www.googleapis.com/auth/spreadsheets"}))
+                             .sign(jwt::algorithm::rs256("", config.private_key));
+      return token;
+    } catch (std::exception const& ex) {
+      return std::unexpected{GoogleSheetsError{
+          .kind    = GoogleSheetsErrorKind::jwt_signing,
+          .message = ex.what(),
+      }};
+    }
   }
-  return url;
-}
 
-auto append_query_parameter(std::string url, std::string_view key, std::string_view value)
-    -> std::string {
-  url += (url.find('?') == std::string::npos) ? '?' : '&';
-  url += std::format("{}={}", percent_encode(key), percent_encode(value));
-  return url;
-}
+  /**
+   * @brief JWT bearer grant 用フォーム本文を生成します。
+   * @param assertion 署名済み JWT assertion です。
+   * @return application/x-www-form-urlencoded 本文です。
+   */
+  auto build_token_request_body(std::string_view assertion) -> std::string {
+    return std::format("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}", percent_encode(assertion));
+  }
 
-auto get_valid_token(
-    ServiceAccountConfig const& auth,
-    std::shared_ptr<ClientSharedState> const& shared_state,
-    TransportFunction const& transport,
-    ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
-  return get_or_refresh_token(shared_state, clock, [&] {
-    return fetch_service_account_token(auth, shared_state, transport, clock);
-  });
-}
+  /**
+   * @brief authorization code 交換用フォーム本文を生成します。
+   * @param auth OAuth2 認証設定です。
+   * @return application/x-www-form-urlencoded 本文です。
+   */
+  auto build_oauth_authorization_code_request_body(UserOAuth2Auth const& auth) -> std::string {
+    return std::format("client_id={}&client_secret={}&redirect_uri={}&code={}&grant_type=authorization_code", percent_encode(auth.client_id), percent_encode(auth.client_secret),
+                       percent_encode(auth.redirect_uri), percent_encode(auth.authorization_code));
+  }
 
-auto get_valid_token(
-    UserOAuth2Auth& auth,
-    std::shared_ptr<ClientSharedState> const& shared_state,
-    TransportFunction const& transport,
-    ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
-  return get_or_refresh_token(shared_state, clock, [&] {
-    return fetch_user_oauth_token(auth, shared_state, transport, clock, false);
-  });
-}
+  /**
+   * @brief refresh token 交換用フォーム本文を生成します。
+   * @param auth OAuth2 認証設定です。
+   * @param refresh_token 利用する refresh token です。
+   * @return application/x-www-form-urlencoded 本文です。
+   */
+  auto build_oauth_refresh_request_body(UserOAuth2Auth const& auth, std::string_view refresh_token) -> std::string {
+    return std::format("client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token", percent_encode(auth.client_id), percent_encode(auth.client_secret), percent_encode(refresh_token));
+  }
 
-auto force_refresh_token(
-    UserOAuth2Auth& auth,
-    std::shared_ptr<ClientSharedState> const& shared_state,
-    TransportFunction const& transport,
-    ClockFunction const& clock,
-    std::string_view failed_access_token) -> std::expected<TokenInfo, GoogleSheetsError> {
-  return force_refresh(shared_state, clock, failed_access_token, [&] {
-    return fetch_user_oauth_token(auth, shared_state, transport, clock, true);
-  });
-}
+  /**
+   * @brief values.update 用 JSON 本文を生成します。
+   * @param values 書き込むセル値一覧です。
+   * @return JSON 本文です。
+   */
+  auto build_write_values_request_body(std::vector<std::vector<std::string>> const& values) -> std::string {
+    auto payload = WriteValuesRequestPayload{
+        .majorDimension = "ROWS",
+        .values         = values,
+    };
+    auto json   = std::string{};
+    std::ignore = glz::write_json(payload, json);
+    return json;
+  }
 
-auto make_google_sheets_client_for_test(
-    ServiceAccountConfig config,
-    TransportFunction transport,
-    ClockFunction clock) -> GoogleSheetsClient {
-  return GoogleSheetsClient{
-      std::move(config),
-      std::move(transport),
-      std::move(clock),
-  };
-}
+  /**
+   * @brief Google Sheets values API の URL を生成します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range A1 形式のレンジです。
+   * @param query 任意の追加クエリです。
+   * @return 組み立て済み URL です。
+   */
+  auto build_values_url(std::string_view spreadsheet_id, std::string_view range, std::string_view query) -> std::string {
+    auto url = std::format("https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}", percent_encode(spreadsheet_id), percent_encode(range));
+    if (!query.empty()) {
+      url += '?';
+      url += query;
+    }
+    return url;
+  }
+
+  /**
+   * @brief URL にクエリパラメータを 1 つ追加します。
+   * @param url 更新対象 URL です。
+   * @param key 追加するキーです。
+   * @param value 追加する値です。
+   * @return 更新後 URL です。
+   */
+  auto append_query_parameter(std::string url, std::string_view key, std::string_view value) -> std::string {
+    url += (url.find('?') == std::string::npos) ? '?' : '&';
+    url += std::format("{}={}", percent_encode(key), percent_encode(value));
+    return url;
+  }
+
+  /**
+   * @brief サービスアカウント向けの有効トークンを返します。
+   * @param auth サービスアカウント設定です。
+   * @param shared_state 共有トークン状態です。
+   * @param transport HTTP 実行関数です。
+   * @param clock 現在時刻関数です。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto get_valid_token(ServiceAccountConfig const& auth, std::shared_ptr<ClientSharedState> const& shared_state, TransportFunction const& transport, ClockFunction const& clock)
+      -> std::expected<TokenInfo, GoogleSheetsError> {
+    return get_or_refresh_token(shared_state, clock, [&] { return fetch_service_account_token(auth, shared_state, transport, clock); });
+  }
+
+  /**
+   * @brief User OAuth2 向けの有効トークンを返します。
+   * @param auth OAuth2 認証設定です。
+   * @param shared_state 共有トークン状態です。
+   * @param transport HTTP 実行関数です。
+   * @param clock 現在時刻関数です。
+   * @return 成功時は TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto get_valid_token(UserOAuth2Auth& auth, std::shared_ptr<ClientSharedState> const& shared_state, TransportFunction const& transport, ClockFunction const& clock)
+      -> std::expected<TokenInfo, GoogleSheetsError> {
+    return get_or_refresh_token(shared_state, clock, [&] { return fetch_user_oauth_token(auth, shared_state, transport, clock, false); });
+  }
+
+  /**
+   * @brief 401 後に User OAuth2 の refresh を強制実行します。
+   * @param auth OAuth2 認証設定です。
+   * @param shared_state 共有トークン状態です。
+   * @param transport HTTP 実行関数です。
+   * @param clock 現在時刻関数です。
+   * @param failed_access_token 失効していたアクセストークンです。
+   * @return 成功時は新しい TokenInfo、失敗時は GoogleSheetsError です。
+   */
+  auto force_refresh_token(UserOAuth2Auth& auth, std::shared_ptr<ClientSharedState> const& shared_state, TransportFunction const& transport, ClockFunction const& clock,
+                           std::string_view failed_access_token) -> std::expected<TokenInfo, GoogleSheetsError> {
+    return force_refresh(shared_state, clock, failed_access_token, [&] { return fetch_user_oauth_token(auth, shared_state, transport, clock, true); });
+  }
+
+  /**
+   * @brief テスト用に依存を差し替えたクライアントを構築します。
+   * @param config サービスアカウント設定です。
+   * @param transport テスト用 transport です。
+   * @param clock 任意の疑似時刻関数です。
+   * @return テスト向け GoogleSheetsClient です。
+   */
+  auto make_google_sheets_client_for_test(ServiceAccountConfig config, TransportFunction transport, ClockFunction clock) -> GoogleSheetsClient {
+    return GoogleSheetsClient{
+        std::move(config),
+        std::move(transport),
+        std::move(clock),
+    };
+  }
 
 }  // namespace detail
 
