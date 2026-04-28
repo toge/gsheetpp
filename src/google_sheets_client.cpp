@@ -1,4 +1,5 @@
 #include "gsheetpp/google_sheets_client.hpp"
+
 #include "google_sheets_client_detail.hpp"
 #include "http_client.hpp"
 
@@ -6,22 +7,10 @@
 #include <jwt-cpp/traits/nlohmann-json/defaults.h>
 
 #include <cctype>
-#include <mutex>
+#include <format>
 #include <tuple>
-#include <utility>
 
 namespace gsheetpp {
-
-/**
- * @brief クライアント内で共有される状態管理構造体
- */
-struct GoogleSheetsClient::SharedState {
-  std::mutex mutex{};
-  std::condition_variable cv{};
-  bool refresh_in_progress{};            ///< トークン更新が進行中かどうか
-  std::optional<TokenInfo> token{};       ///< キャッシュされたトークン
-  std::chrono::system_clock::time_point expires_at{}; ///< トークンの有効期限
-};
 
 namespace {
 
@@ -33,6 +22,7 @@ struct TokenResponsePayload {
   std::string access_token{};
   std::string token_type{};
   long expires_in{};
+  std::optional<std::string> refresh_token{};
 };
 
 struct ReadValuesPayload {
@@ -130,23 +120,76 @@ auto now_or_default(detail::ClockFunction const& clock)
   return std::chrono::system_clock::now();
 }
 
-auto build_values_url(
-    std::string_view spreadsheet_id,
-    std::string_view range,
-    std::string_view query = {}) -> std::string {
-  auto url = std::string{
-      "https://sheets.googleapis.com/v4/spreadsheets/" + percent_encode(spreadsheet_id) +
-      "/values/" + percent_encode(range)};
-  if (!query.empty()) {
-    url += '?';
-    url += query;
-  }
-  return url;
+auto token_is_valid(
+    std::shared_ptr<detail::ClientSharedState> const& shared_state,
+    detail::ClockFunction const& clock) -> bool {
+  auto const now = now_or_default(clock);
+  return shared_state->token.has_value() &&
+         (shared_state->expires_at - std::chrono::seconds{30} > now);
 }
 
-auto perform_authenticated_request(
+auto store_token(
+    std::shared_ptr<detail::ClientSharedState> const& shared_state,
+    TokenInfo const& token,
+    std::chrono::system_clock::time_point issued_at) -> void {
+  auto _ = std::scoped_lock{shared_state->mutex};
+  shared_state->token = token;
+  shared_state->expires_at = issued_at + std::chrono::seconds{token.expires_in_seconds};
+}
+
+template <class Fetch>
+auto get_or_refresh_token(
+    std::shared_ptr<detail::ClientSharedState> const& shared_state,
+    detail::ClockFunction const& clock,
+    Fetch&& fetch) -> std::expected<TokenInfo, GoogleSheetsError> {
+  auto lock = std::unique_lock{shared_state->mutex};
+  while (shared_state->refresh_in_progress) {
+    shared_state->cv.wait(lock);
+  }
+
+  if (token_is_valid(shared_state, clock)) {
+    return *shared_state->token;
+  }
+
+  shared_state->refresh_in_progress = true;
+  lock.unlock();
+
+  auto guard = detail::RefreshInProgressGuard{
+      shared_state->mutex,
+      shared_state->cv,
+      shared_state->refresh_in_progress,
+  };
+  return fetch();
+}
+
+template <class Fetch>
+auto force_refresh(
+    std::shared_ptr<detail::ClientSharedState> const& shared_state,
+    detail::ClockFunction const& clock,
+    std::string_view failed_access_token,
+    Fetch&& fetch) -> std::expected<TokenInfo, GoogleSheetsError> {
+  {
+    auto lock = std::unique_lock{shared_state->mutex};
+    while (shared_state->refresh_in_progress) {
+      shared_state->cv.wait(lock);
+    }
+    if (token_is_valid(shared_state, clock) && shared_state->token->access_token != failed_access_token) {
+      return *shared_state->token;
+    }
+    shared_state->refresh_in_progress = true;
+  }
+
+  auto guard = detail::RefreshInProgressGuard{
+      shared_state->mutex,
+      shared_state->cv,
+      shared_state->refresh_in_progress,
+  };
+  return fetch();
+}
+
+auto perform_request(
     detail::TransportFunction const& transport,
-    detail::HttpRequest request) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
+    detail::HttpRequest const& request) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
   if (!transport) {
     return std::unexpected{GoogleSheetsError{
         .kind = GoogleSheetsErrorKind::network,
@@ -156,41 +199,147 @@ auto perform_authenticated_request(
   return transport(request);
 }
 
-auto handle_sheet_error(std::string_view body, long status)
-    -> std::unexpected<GoogleSheetsError> {
-  auto api_error_message = detail::parse_api_error_response(body);
-  if (!api_error_message) {
-    return std::unexpected{make_http_error(
-        GoogleSheetsErrorKind::http,
-        "google sheets request failed",
-        status,
-        body)};
+auto fetch_service_account_token(
+    ServiceAccountConfig const& auth,
+    std::shared_ptr<detail::ClientSharedState> const& shared_state,
+    detail::TransportFunction const& transport,
+    detail::ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
+  auto const issued_at = now_or_default(clock);
+  auto assertion = detail::build_jwt_assertion(auth, issued_at);
+  if (!assertion) {
+    return std::unexpected{assertion.error()};
   }
-  return std::unexpected{make_http_error(
-      GoogleSheetsErrorKind::api_response,
-      api_error_message->empty() ? "google api request failed" : *api_error_message,
-      status,
-      body)};
+
+  auto response = perform_request(
+      transport,
+      detail::HttpRequest{
+          .method = "POST",
+          .url = auth.token_uri,
+          .headers = {"Content-Type: application/x-www-form-urlencoded"},
+          .body = detail::build_token_request_body(assertion.value()),
+      });
+  if (!response) {
+    return std::unexpected{response.error()};
+  }
+  if (response->status_code >= 400) {
+    auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
+    return std::unexpected{auth_error.error()};
+  }
+
+  auto token = detail::parse_token_response(response->body);
+  if (!token) {
+    return std::unexpected{token.error()};
+  }
+
+  store_token(shared_state, *token, issued_at);
+  return token;
+}
+
+auto validate_user_oauth_config(UserOAuth2Auth const& auth)
+    -> std::expected<void, GoogleSheetsError> {
+  if (auth.client_id.empty()) {
+    return std::unexpected{make_configuration_error("client_id is required")};
+  }
+  if (auth.client_secret.empty()) {
+    return std::unexpected{make_configuration_error("client_secret is required")};
+  }
+  if (auth.token_uri.empty()) {
+    return std::unexpected{make_configuration_error("token_uri is required")};
+  }
+  if (auth.current_refresh_token().empty() && auth.authorization_code.empty()) {
+    return std::unexpected{GoogleSheetsError{
+        .kind = GoogleSheetsErrorKind::authentication,
+        .message = "user OAuth2 requires a refresh token or authorization code",
+    }};
+  }
+  if (auth.current_refresh_token().empty() && auth.redirect_uri.empty()) {
+    return std::unexpected{make_configuration_error("redirect_uri is required for authorization_code exchange")};
+  }
+  return {};
+}
+
+auto fetch_user_oauth_token(
+    UserOAuth2Auth& auth,
+    std::shared_ptr<detail::ClientSharedState> const& shared_state,
+    detail::TransportFunction const& transport,
+    detail::ClockFunction const& clock,
+    bool force_refresh_only) -> std::expected<TokenInfo, GoogleSheetsError> {
+  auto const validated = validate_user_oauth_config(auth);
+  if (!validated) {
+    return std::unexpected{validated.error()};
+  }
+  auto used_authorization_code = false;
+  auto const auth_refresh_token = auth.current_refresh_token();
+  auto refresh_token_snapshot = std::string{};
+  {
+    auto _ = std::scoped_lock{shared_state->mutex};
+    if (shared_state->refresh_token.has_value()) {
+      refresh_token_snapshot = *shared_state->refresh_token;
+    }
+    else if (!auth_refresh_token.empty()) {
+      shared_state->refresh_token = auth_refresh_token;
+      refresh_token_snapshot = auth_refresh_token;
+    }
+  }
+  if (!refresh_token_snapshot.empty() && refresh_token_snapshot != auth_refresh_token) {
+    auth.set_refresh_token(refresh_token_snapshot);
+  }
+
+  auto request_body = std::string{};
+  if (!refresh_token_snapshot.empty()) {
+    request_body = detail::build_oauth_refresh_request_body(auth, refresh_token_snapshot);
+  }
+  else if (!force_refresh_only && !auth.authorization_code.empty()) {
+    used_authorization_code = true;
+    request_body = detail::build_oauth_authorization_code_request_body(auth);
+  }
+  else {
+    return std::unexpected{GoogleSheetsError{
+        .kind = GoogleSheetsErrorKind::authentication,
+        .message = "user OAuth2 requires a refresh token or authorization code",
+    }};
+  }
+
+  auto response = perform_request(
+      transport,
+      detail::HttpRequest{
+          .method = "POST",
+          .url = auth.token_uri,
+          .headers = {"Content-Type: application/x-www-form-urlencoded"},
+          .body = std::move(request_body),
+      });
+  if (!response) {
+    return std::unexpected{response.error()};
+  }
+  if (response->status_code >= 400) {
+    auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
+    return std::unexpected{auth_error.error()};
+  }
+
+  auto oauth_response = detail::parse_oauth_token_response(response->body);
+  if (!oauth_response) {
+    return std::unexpected{oauth_response.error()};
+  }
+
+  auto latest_refresh_token = std::optional<std::string>{};
+  if (oauth_response->refresh_token.has_value()) {
+    auto _ = std::scoped_lock{shared_state->mutex};
+    shared_state->refresh_token = *oauth_response->refresh_token;
+    latest_refresh_token = oauth_response->refresh_token;
+  }
+  if (latest_refresh_token.has_value()) {
+    auth.set_refresh_token(*latest_refresh_token);
+  }
+  if (used_authorization_code) {
+    auth.authorization_code.clear();
+  }
+
+  auto const issued_at = now_or_default(clock);
+  store_token(shared_state, oauth_response->token, issued_at);
+  return oauth_response->token;
 }
 
 }  // namespace
-
-GoogleSheetsClient::GoogleSheetsClient(ServiceAccountConfig config)
-    : GoogleSheetsClient(
-          std::move(config),
-          [](detail::HttpRequest const& request) {
-            return http::perform_http_request(request);
-          },
-          {}) {}
-
-GoogleSheetsClient::GoogleSheetsClient(
-    ServiceAccountConfig config,
-    detail::TransportFunction transport,
-    detail::ClockFunction clock)
-    : config_(std::move(config)),
-      transport_(std::move(transport)),
-      clock_(std::move(clock)),
-      shared_state_(std::make_shared<SharedState>()) {}
 
 auto parse_service_account_config(std::string_view json)
     -> std::expected<ServiceAccountConfig, GoogleSheetsError> {
@@ -212,161 +361,13 @@ auto parse_service_account_config(std::string_view json)
   return std::move(config.value());
 }
 
-auto GoogleSheetsClient::authenticate_async()
-    -> std::future<std::expected<TokenInfo, GoogleSheetsError>> {
-  return std::async(std::launch::async, [this] { return refresh_token(); });
-}
-
-auto GoogleSheetsClient::read_values_async(std::string_view spreadsheet_id, std::string_view range)
-    -> std::future<std::expected<ReadValuesResult, GoogleSheetsError>> {
-  auto const spreadsheet = std::string{spreadsheet_id};
-  auto const read_range = std::string{range};
-  return std::async(std::launch::async, [this, spreadsheet, read_range]
-                                               -> std::expected<ReadValuesResult, GoogleSheetsError> {
-    auto token = get_valid_token();
-    if (!token) {
-      return std::unexpected{token.error()};
-    }
-
-    auto response = perform_authenticated_request(
-        transport_,
-        detail::HttpRequest{
-            .method = "GET",
-            .url = build_values_url(spreadsheet, read_range),
-            .headers = {"Authorization: Bearer " + token->access_token},
-        });
-    if (!response) {
-      return std::unexpected{response.error()};
-    }
-    if (response->status_code >= 400) {
-      return std::unexpected{handle_sheet_error(response->body, response->status_code).error()};
-    }
-
-    return detail::parse_read_values_response(response->body);
-  });
-}
-
-auto GoogleSheetsClient::write_values_async(
-    std::string_view spreadsheet_id,
-    std::string_view range,
-    std::span<std::vector<std::string> const> data)
-    -> std::future<std::expected<WriteValuesResult, GoogleSheetsError>> {
-  auto const spreadsheet = std::string{spreadsheet_id};
-  auto const write_range = std::string{range};
-  auto const values = std::vector<std::vector<std::string>>{data.begin(), data.end()};
-  return std::async(
-      std::launch::async,
-      [this, spreadsheet, write_range, values]
-          -> std::expected<WriteValuesResult, GoogleSheetsError> {
-    auto token = get_valid_token();
-    if (!token) {
-      return std::unexpected{token.error()};
-    }
-
-    auto response = perform_authenticated_request(
-        transport_,
-        detail::HttpRequest{
-            .method = "PUT",
-            .url = build_values_url(spreadsheet, write_range, "valueInputOption=RAW"),
-            .headers = {
-                "Authorization: Bearer " + token->access_token,
-                "Content-Type: application/json",
-            },
-            .body = detail::build_write_values_request_body(values),
-        });
-    if (!response) {
-      return std::unexpected{response.error()};
-    }
-    if (response->status_code >= 400) {
-      return std::unexpected{handle_sheet_error(response->body, response->status_code).error()};
-    }
-
-    return detail::parse_write_values_response(response->body);
-      });
-}
-
-/**
- * @brief トークンを強制的に更新します。
- * 複数のスレッドから同時に呼び出された場合、一つのスレッドのみが更新を行い、他は完了を待ちます。
- */
-auto GoogleSheetsClient::refresh_token() -> std::expected<TokenInfo, GoogleSheetsError> {
-  {
-    auto lock = std::unique_lock{shared_state_->mutex};
-    while (shared_state_->refresh_in_progress) {
-      shared_state_->cv.wait(lock);
-    }
-    shared_state_->refresh_in_progress = true;
-  }
-
-  return do_token_fetch();
-}
-
-/**
- * @brief 有効なトークンを取得します。
- * キャッシュされたトークンが有効であればそれを返し、期限切れが近ければ更新を行います。
- */
-auto GoogleSheetsClient::get_valid_token() -> std::expected<TokenInfo, GoogleSheetsError> {
-  auto lock = std::unique_lock{shared_state_->mutex};
-  while (shared_state_->refresh_in_progress) {
-    shared_state_->cv.wait(lock);
-  }
-
-  auto now = now_or_default(clock_);
-  auto token_is_valid = shared_state_->token.has_value() &&
-                        (shared_state_->expires_at - std::chrono::seconds{30} > now);
-  if (token_is_valid) {
-    return *shared_state_->token;
-  }
-
-  shared_state_->refresh_in_progress = true;
-  lock.unlock();
-
-  return do_token_fetch();
-}
-
-auto GoogleSheetsClient::do_token_fetch() -> std::expected<TokenInfo, GoogleSheetsError> {
-  auto guard = detail::RefreshInProgressGuard{
-      shared_state_->mutex,
-      shared_state_->cv,
-      shared_state_->refresh_in_progress,
-  };
-  auto const issued_at = now_or_default(clock_);
-  auto assertion = detail::build_jwt_assertion(config_, issued_at);
-  if (!assertion) {
-    return std::unexpected{assertion.error()};
-  }
-
-  auto response = perform_authenticated_request(
-      transport_,
-      detail::HttpRequest{
-          .method = "POST",
-          .url = config_.token_uri,
-          .headers = {"Content-Type: application/x-www-form-urlencoded"},
-          .body = detail::build_token_request_body(assertion.value()),
-      });
-  if (!response) {
-    return std::unexpected{response.error()};
-  }
-  if (response->status_code >= 400) {
-    auto auth_error = detail::parse_token_error_response(response->body, response->status_code);
-    return std::unexpected{auth_error.error()};
-  }
-
-  auto token = detail::parse_token_response(response->body);
-  if (!token) {
-    return std::unexpected{token.error()};
-  }
-
-  {
-    auto lock = std::scoped_lock{shared_state_->mutex};
-    shared_state_->token = token.value();
-    shared_state_->expires_at = issued_at + std::chrono::seconds{token->expires_in_seconds};
-  }
-
-  return token;
-}
-
 namespace detail {
+
+auto default_transport() -> TransportFunction {
+  return [](HttpRequest const& request) {
+    return http::perform_http_request(request);
+  };
+}
 
 auto parse_token_response(std::string_view json)
     -> std::expected<TokenInfo, GoogleSheetsError> {
@@ -379,6 +380,23 @@ auto parse_token_response(std::string_view json)
       .access_token = std::move(payload->access_token),
       .token_type = std::move(payload->token_type),
       .expires_in_seconds = payload->expires_in,
+  };
+}
+
+auto parse_oauth_token_response(std::string_view json)
+    -> std::expected<OAuthTokenResponse, GoogleSheetsError> {
+  auto payload = parse_json<TokenResponsePayload>(json, "failed to parse OAuth token response");
+  if (!payload) {
+    return std::unexpected{payload.error()};
+  }
+
+  return OAuthTokenResponse{
+      .token = TokenInfo{
+          .access_token = std::move(payload->access_token),
+          .token_type = std::move(payload->token_type),
+          .expires_in_seconds = payload->expires_in,
+      },
+      .refresh_token = std::move(payload->refresh_token),
   };
 }
 
@@ -458,8 +476,27 @@ auto build_jwt_assertion(
 }
 
 auto build_token_request_body(std::string_view assertion) -> std::string {
-  return "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" +
-         percent_encode(assertion);
+  return std::format(
+      "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
+      percent_encode(assertion));
+}
+
+auto build_oauth_authorization_code_request_body(UserOAuth2Auth const& auth) -> std::string {
+  return std::format(
+      "client_id={}&client_secret={}&redirect_uri={}&code={}&grant_type=authorization_code",
+      percent_encode(auth.client_id),
+      percent_encode(auth.client_secret),
+      percent_encode(auth.redirect_uri),
+      percent_encode(auth.authorization_code));
+}
+
+auto build_oauth_refresh_request_body(UserOAuth2Auth const& auth, std::string_view refresh_token)
+    -> std::string {
+  return std::format(
+      "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+      percent_encode(auth.client_id),
+      percent_encode(auth.client_secret),
+      percent_encode(refresh_token));
 }
 
 auto build_write_values_request_body(std::vector<std::vector<std::string>> const& values)
@@ -473,11 +510,68 @@ auto build_write_values_request_body(std::vector<std::vector<std::string>> const
   return json;
 }
 
+auto build_values_url(
+    std::string_view spreadsheet_id,
+    std::string_view range,
+    std::string_view query) -> std::string {
+  auto url = std::format(
+      "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
+      percent_encode(spreadsheet_id),
+      percent_encode(range));
+  if (!query.empty()) {
+    url += '?';
+    url += query;
+  }
+  return url;
+}
+
+auto append_query_parameter(std::string url, std::string_view key, std::string_view value)
+    -> std::string {
+  url += (url.find('?') == std::string::npos) ? '?' : '&';
+  url += std::format("{}={}", percent_encode(key), percent_encode(value));
+  return url;
+}
+
+auto get_valid_token(
+    ServiceAccountConfig const& auth,
+    std::shared_ptr<ClientSharedState> const& shared_state,
+    TransportFunction const& transport,
+    ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
+  return get_or_refresh_token(shared_state, clock, [&] {
+    return fetch_service_account_token(auth, shared_state, transport, clock);
+  });
+}
+
+auto get_valid_token(
+    UserOAuth2Auth& auth,
+    std::shared_ptr<ClientSharedState> const& shared_state,
+    TransportFunction const& transport,
+    ClockFunction const& clock) -> std::expected<TokenInfo, GoogleSheetsError> {
+  return get_or_refresh_token(shared_state, clock, [&] {
+    return fetch_user_oauth_token(auth, shared_state, transport, clock, false);
+  });
+}
+
+auto force_refresh_token(
+    UserOAuth2Auth& auth,
+    std::shared_ptr<ClientSharedState> const& shared_state,
+    TransportFunction const& transport,
+    ClockFunction const& clock,
+    std::string_view failed_access_token) -> std::expected<TokenInfo, GoogleSheetsError> {
+  return force_refresh(shared_state, clock, failed_access_token, [&] {
+    return fetch_user_oauth_token(auth, shared_state, transport, clock, true);
+  });
+}
+
 auto make_google_sheets_client_for_test(
     ServiceAccountConfig config,
     TransportFunction transport,
     ClockFunction clock) -> GoogleSheetsClient {
-  return GoogleSheetsClient{std::move(config), std::move(transport), std::move(clock)};
+  return GoogleSheetsClient{
+      std::move(config),
+      std::move(transport),
+      std::move(clock),
+  };
 }
 
 }  // namespace detail

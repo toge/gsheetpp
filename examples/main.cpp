@@ -6,6 +6,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -13,7 +14,7 @@ namespace {
 auto read_file(std::string_view path) -> std::expected<std::string, std::string> {
   auto input = std::ifstream{std::string{path}};
   if (!input.is_open()) {
-    return std::unexpected{"failed to open service account JSON file"};
+    return std::unexpected{"failed to open input file"};
   }
 
   auto contents = std::string{
@@ -43,65 +44,153 @@ auto print_error(gsheetpp::GoogleSheetsError const& error) -> void {
   }
 }
 
-}  // namespace
-
-auto main(int argc, char** argv) -> int {
-  if (argc != 6) {
-    std::cerr
-        << "usage: gsheetpp_example <service-account.json> <spreadsheet-id> <read-range> "
-           "<write-range> <write-values-json>\n";
-    return 1;
-  }
-
-  auto const service_account_path = std::string_view{argv[1]};
-  auto const spreadsheet_id = std::string_view{argv[2]};
-  auto const read_range = std::string_view{argv[3]};
-  auto const write_range = std::string_view{argv[4]};
-  auto const write_values_json = std::string_view{argv[5]};
-
-  auto file_contents = read_file(service_account_path);
-  if (!file_contents) {
-    std::cerr << file_contents.error() << '\n';
-    return 1;
-  }
-
-  auto config = gsheetpp::parse_service_account_config(*file_contents);
-  if (!config) {
-    print_error(config.error());
-    return 1;
-  }
-
-  auto values = parse_values_json(write_values_json);
-  if (!values) {
-    std::cerr << values.error() << '\n';
-    return 1;
-  }
-
-  auto client = gsheetpp::GoogleSheetsClient{*config};
-
-  auto auth = client.authenticate_async().get();
-  if (!auth) {
-    print_error(auth.error());
-    return 1;
-  }
-  std::cout << "authenticated as token type " << auth->token_type << '\n';
-
+auto run_read(
+    auto& client,
+    std::string_view spreadsheet_id,
+    std::string_view read_range) -> bool {
   auto read_result = client.read_values_async(spreadsheet_id, read_range).get();
   if (!read_result) {
     print_error(read_result.error());
-    return 1;
+    return false;
   }
+
   std::cout << "read range: " << read_result->range << " rows=" << read_result->values.size()
             << '\n';
+  return true;
+}
 
-  auto write_result =
-      client.write_values_async(spreadsheet_id, write_range, std::span{values.value()}).get();
+auto run_write(
+    auto& client,
+    std::string_view spreadsheet_id,
+    std::string_view write_range,
+    std::span<std::vector<std::string> const> values) -> bool {
+  auto write_result = client.write_values_async(spreadsheet_id, write_range, values).get();
   if (!write_result) {
     print_error(write_result.error());
-    return 1;
+    return false;
   }
+
   std::cout << "updated range: " << write_result->updated_range
             << " cells=" << write_result->updated_cells << '\n';
+  return true;
+}
 
-  return 0;
+auto print_usage() -> void {
+  std::cerr
+      << "usage:\n"
+      << "  gsheetpp_example api-key <api-key> <spreadsheet-id> <read-range>\n"
+      << "  gsheetpp_example service-account <service-account.json> <spreadsheet-id> "
+         "<read-range> <write-range> <write-values-json>\n"
+      << "  gsheetpp_example oauth-code <client-id> <client-secret> <redirect-uri> "
+         "<authorization-code> <spreadsheet-id> <read-range> <write-range> "
+         "<write-values-json>\n"
+      << "  gsheetpp_example oauth-refresh <client-id> <client-secret> <refresh-token> "
+         "<spreadsheet-id> <read-range> <write-range> <write-values-json>\n";
+}
+
+}  // namespace
+
+auto main(int argc, char** argv) -> int {
+  if (argc < 2) {
+    print_usage();
+    return 1;
+  }
+
+  auto const mode = std::string_view{argv[1]};
+  if (mode == "api-key") {
+    if (argc != 5) {
+      print_usage();
+      return 1;
+    }
+
+    auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>{
+        gsheetpp::ApiKeyAuth{
+            .api_key = argv[2],
+        }};
+    return run_read(client, argv[3], argv[4]) ? 0 : 1;
+  }
+
+  if (mode == "service-account") {
+    if (argc != 7) {
+      print_usage();
+      return 1;
+    }
+
+    auto file_contents = read_file(argv[2]);
+    if (!file_contents) {
+      std::cerr << file_contents.error() << '\n';
+      return 1;
+    }
+
+    auto config = gsheetpp::parse_service_account_config(*file_contents);
+    if (!config) {
+      print_error(config.error());
+      return 1;
+    }
+
+    auto values = parse_values_json(argv[6]);
+    if (!values) {
+      std::cerr << values.error() << '\n';
+      return 1;
+    }
+
+    auto client = gsheetpp::GoogleSheetsClient{*config};
+    if (!run_read(client, argv[3], argv[4])) {
+      return 1;
+    }
+    return run_write(client, argv[3], argv[5], values.value()) ? 0 : 1;
+  }
+
+  if (mode == "oauth-code") {
+    if (argc != 10) {
+      print_usage();
+      return 1;
+    }
+
+    auto values = parse_values_json(argv[9]);
+    if (!values) {
+      std::cerr << values.error() << '\n';
+      return 1;
+    }
+
+    auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+        gsheetpp::UserOAuth2Auth{
+            .client_id = argv[2],
+            .client_secret = argv[3],
+            .redirect_uri = argv[4],
+            .scopes = {"https://www.googleapis.com/auth/spreadsheets"},
+            .authorization_code = argv[5],
+        }};
+    if (!run_read(client, argv[6], argv[7])) {
+      return 1;
+    }
+    return run_write(client, argv[6], argv[8], values.value()) ? 0 : 1;
+  }
+
+  if (mode == "oauth-refresh") {
+    if (argc != 9) {
+      print_usage();
+      return 1;
+    }
+
+    auto values = parse_values_json(argv[8]);
+    if (!values) {
+      std::cerr << values.error() << '\n';
+      return 1;
+    }
+
+    auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+        gsheetpp::UserOAuth2Auth{
+            .client_id = argv[2],
+            .client_secret = argv[3],
+            .refresh_token = argv[4],
+        }};
+    if (!run_read(client, argv[5], argv[6])) {
+      return 1;
+    }
+    return run_write(client, argv[5], argv[7], values.value()) ? 0 : 1;
+  }
+
+  print_usage();
+  return 1;
 }

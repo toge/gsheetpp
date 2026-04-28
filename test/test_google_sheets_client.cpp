@@ -109,6 +109,45 @@ TEST_CASE("service account JSON ignores extra Google fields", "[service-account]
   CHECK(parsed->project_id == "demo-project");
 }
 
+TEST_CASE("service account JSON requires client_email", "[service-account]") {
+  auto const json = R"({
+    "private_key":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+    "token_uri":"https://oauth2.googleapis.com/token"
+  })";
+
+  auto parsed = gsheetpp::parse_service_account_config(json);
+
+  REQUIRE_FALSE(parsed.has_value());
+  CHECK(parsed.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(parsed.error().message == "client_email is required");
+}
+
+TEST_CASE("service account JSON requires private_key", "[service-account]") {
+  auto const json = R"({
+    "client_email":"svc@example.iam.gserviceaccount.com",
+    "token_uri":"https://oauth2.googleapis.com/token"
+  })";
+
+  auto parsed = gsheetpp::parse_service_account_config(json);
+
+  REQUIRE_FALSE(parsed.has_value());
+  CHECK(parsed.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(parsed.error().message == "private_key is required");
+}
+
+TEST_CASE("service account JSON requires token_uri", "[service-account]") {
+  auto const json = R"({
+    "client_email":"svc@example.iam.gserviceaccount.com",
+    "private_key":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"
+  })";
+
+  auto parsed = gsheetpp::parse_service_account_config(json);
+
+  REQUIRE_FALSE(parsed.has_value());
+  CHECK(parsed.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(parsed.error().message == "token_uri is required");
+}
+
 TEST_CASE("token response is parsed", "[responses]") {
   auto const json = R"({
     "access_token":"token-value",
@@ -500,4 +539,485 @@ TEST_CASE("concurrent reads share one token refresh", "[client]") {
   REQUIRE(result_b.has_value());
   CHECK(token_requests == 1);
   CHECK(read_requests == 2);
+}
+
+TEST_CASE("set_authenticator rebinds the client type", "[client][auth]") {
+  auto client = gsheetpp::GoogleSheetsClient{
+      gsheetpp::ServiceAccountConfig{
+          .client_email = "svc@example.iam.gserviceaccount.com",
+          .private_key = make_test_private_key(),
+          .token_uri = "https://oauth2.googleapis.com/token",
+          .project_id = "demo-project",
+      }};
+
+  auto api_key_client = client.set_authenticator(gsheetpp::ApiKeyAuth{
+      .api_key = "demo-key",
+  });
+
+  STATIC_REQUIRE(std::same_as<decltype(api_key_client), gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>>);
+}
+
+TEST_CASE("api key authenticate_async is a no-op success", "[client][api-key]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient{
+      gsheetpp::ApiKeyAuth{
+          .api_key = "demo-key",
+      },
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        FAIL("api key authenticate_async should not hit the transport");
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE(result.has_value());
+  CHECK(result->token_type == "ApiKey");
+  CHECK(result->access_token.empty());
+}
+
+TEST_CASE("api key authenticate_async stays a no-op success even when the key is empty",
+          "[client][api-key]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>{
+      gsheetpp::ApiKeyAuth{},
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        FAIL("api key authenticate_async should not hit the transport");
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE(result.has_value());
+  CHECK(result->token_type == "ApiKey");
+}
+
+TEST_CASE("api key reads append the key query parameter without authorization header",
+          "[client][api-key]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient{
+      gsheetpp::ApiKeyAuth{
+          .api_key = "demo-key",
+      },
+      [](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        CHECK(request.method == "GET");
+        CHECK(request.url ==
+              "https://sheets.googleapis.com/v4/spreadsheets/spreadsheet-id/values/Sheet1%21A1%3AB2?key=demo-key");
+        CHECK(request.headers.empty());
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body = R"({"range":"Sheet1!A1:B2","majorDimension":"ROWS","values":[["a","b"]]})",
+        };
+      }};
+
+  auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE(result.has_value());
+  CHECK(result->range == "Sheet1!A1:B2");
+}
+
+TEST_CASE("api key writes fail before issuing an HTTP request", "[client][api-key]") {
+  auto transport_called = false;
+  auto client = gsheetpp::BasicGoogleSheetsClient{
+      gsheetpp::ApiKeyAuth{
+          .api_key = "demo-key",
+      },
+      [&](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        transport_called = true;
+        return gsheetpp::detail::HttpResponse{};
+      }};
+  auto const values = std::vector<std::vector<std::string>>{{"demo"}};
+
+  auto result = client.write_values_async("spreadsheet-id", "Sheet1!A1", values).get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK_FALSE(transport_called);
+}
+
+TEST_CASE("api key reads reject an empty key before issuing an HTTP request", "[client][api-key]") {
+  auto transport_called = false;
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>{
+      gsheetpp::ApiKeyAuth{},
+      [&](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        transport_called = true;
+        return gsheetpp::detail::HttpResponse{};
+      }};
+
+  auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(result.error().message == "api_key is required");
+  CHECK_FALSE(transport_called);
+}
+
+TEST_CASE("user oauth authenticate_async exchanges an authorization code and persists refresh token",
+          "[client][oauth]") {
+  auto token_requests = 0;
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .redirect_uri = "http://127.0.0.1/callback",
+          .scopes = {"https://www.googleapis.com/auth/spreadsheets"},
+          .authorization_code = "auth-code-123",
+      },
+      [&](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        ++token_requests;
+        CHECK(request.method == "POST");
+        CHECK(request.url == "https://oauth2.googleapis.com/token");
+        CHECK(request.body.find("grant_type=authorization_code") != std::string::npos);
+        CHECK(request.body.find("code=auth-code-123") != std::string::npos);
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body =
+                R"({"access_token":"oauth-token","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-123"})",
+        };
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE(result.has_value());
+  CHECK(result->access_token == "oauth-token");
+  CHECK(client.authenticator().current_refresh_token() == "refresh-123");
+  CHECK(token_requests == 1);
+}
+
+TEST_CASE("user oauth prefers a refresh token over an authorization code", "[client][oauth]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .redirect_uri = "http://127.0.0.1/callback",
+          .authorization_code = "stale-code",
+          .refresh_token = "refresh-123",
+      },
+      [](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        CHECK(request.body.find("grant_type=refresh_token") != std::string::npos);
+        CHECK(request.body.find("refresh_token=refresh-123") != std::string::npos);
+        CHECK(request.body.find("code=stale-code") == std::string::npos);
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body = R"({"access_token":"oauth-token","token_type":"Bearer","expires_in":3600})",
+        };
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE(result.has_value());
+  CHECK(result->access_token == "oauth-token");
+}
+
+TEST_CASE("user oauth clears the authorization code after a successful exchange",
+          "[client][oauth]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .redirect_uri = "http://127.0.0.1/callback",
+          .authorization_code = "auth-code-123",
+      },
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body = R"({"access_token":"oauth-token","token_type":"Bearer","expires_in":3600})",
+        };
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE(result.has_value());
+  CHECK(client.authenticator().authorization_code.empty());
+}
+
+TEST_CASE("user oauth requires either a refresh token or an authorization code", "[client][oauth]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+      },
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        FAIL("missing OAuth bootstrap data should fail before hitting the transport");
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::authentication);
+  CHECK(result.error().message == "user OAuth2 requires a refresh token or authorization code");
+}
+
+TEST_CASE("user oauth requires client_id", "[client][oauth]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_secret = "client-secret",
+          .refresh_token = "refresh-123",
+      },
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        FAIL("missing client_id should fail before hitting the transport");
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(result.error().message == "client_id is required");
+}
+
+TEST_CASE("user oauth requires client_secret", "[client][oauth]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .refresh_token = "refresh-123",
+      },
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        FAIL("missing client_secret should fail before hitting the transport");
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(result.error().message == "client_secret is required");
+}
+
+TEST_CASE("user oauth authorization_code exchange requires redirect_uri", "[client][oauth]") {
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .authorization_code = "auth-code-123",
+      },
+      [](gsheetpp::detail::HttpRequest const&)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        FAIL("missing redirect_uri should fail before hitting the transport");
+      }};
+
+  auto result = client.authenticate_async().get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+  CHECK(result.error().message == "redirect_uri is required for authorization_code exchange");
+}
+
+TEST_CASE("moved-from user oauth objects keep refresh token accessors safe", "[client][oauth]") {
+  auto auth = gsheetpp::UserOAuth2Auth{
+      .client_id = "client-id",
+      .client_secret = "client-secret",
+      .refresh_token = "refresh-123",
+  };
+  auto moved = std::move(auth);
+
+  CHECK_NOTHROW(std::ignore = auth.current_refresh_token());
+  CHECK_NOTHROW(auth.set_refresh_token("replacement"));
+  CHECK(moved.current_refresh_token() == "refresh-123");
+}
+
+TEST_CASE("user oauth retries once after a 401 response", "[client][oauth]") {
+  auto token_requests = 0;
+  auto read_requests = 0;
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .redirect_uri = "http://127.0.0.1/callback",
+          .authorization_code = "auth-code-123",
+      },
+      [&](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          ++token_requests;
+          if (token_requests == 1) {
+            return gsheetpp::detail::HttpResponse{
+                .status_code = 200,
+                .body =
+                    R"({"access_token":"oauth-token-1","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-123"})",
+            };
+          }
+
+          CHECK(request.body.find("grant_type=refresh_token") != std::string::npos);
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body = R"({"access_token":"oauth-token-2","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        ++read_requests;
+        if (read_requests == 1) {
+          CHECK(request.headers.at(0) == "Authorization: Bearer oauth-token-1");
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 401,
+              .body = R"({"error":{"code":401,"message":"expired","status":"UNAUTHENTICATED"}})",
+          };
+        }
+
+        CHECK(request.headers.at(0) == "Authorization: Bearer oauth-token-2");
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body = R"({"range":"Sheet1!A1:B2","majorDimension":"ROWS","values":[["ok"]]})",
+        };
+      }};
+
+  auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE(result.has_value());
+  CHECK(token_requests == 2);
+  CHECK(read_requests == 2);
+  CHECK(result->values.at(0).at(0) == "ok");
+}
+
+TEST_CASE("user oauth returns the post-retry error after a second 401 response", "[client][oauth]") {
+  auto token_requests = 0;
+  auto read_requests = 0;
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .redirect_uri = "http://127.0.0.1/callback",
+          .authorization_code = "auth-code-123",
+      },
+      [&](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          ++token_requests;
+          if (token_requests == 1) {
+            return gsheetpp::detail::HttpResponse{
+                .status_code = 200,
+                .body =
+                    R"({"access_token":"oauth-token-1","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-123"})",
+            };
+          }
+
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body = R"({"access_token":"oauth-token-2","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        ++read_requests;
+        if (read_requests == 1) {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 401,
+              .body = R"({"error":{"code":401,"message":"expired","status":"UNAUTHENTICATED"}})",
+          };
+        }
+
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 401,
+            .body = R"({"error":{"code":401,"message":"still expired","status":"UNAUTHENTICATED"}})",
+        };
+      }};
+
+  auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(token_requests == 2);
+  CHECK(read_requests == 2);
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::api_response);
+  CHECK(result.error().message == "still expired");
+}
+
+TEST_CASE("concurrent oauth retries share one refresh after 401", "[client][oauth]") {
+  auto token_requests = std::atomic_int{0};
+  auto read_requests = std::atomic_int{0};
+  auto first_wave_mutex = std::mutex{};
+  auto first_wave_cv = std::condition_variable{};
+  auto first_wave_token_1_requests = 0;
+  auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+      gsheetpp::UserOAuth2Auth{
+          .client_id = "client-id",
+          .client_secret = "client-secret",
+          .refresh_token = "refresh-123",
+      },
+      [&](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          ++token_requests;
+          if (token_requests == 1) {
+            return gsheetpp::detail::HttpResponse{
+                .status_code = 200,
+                .body = R"({"access_token":"oauth-token-1","token_type":"Bearer","expires_in":3600})",
+            };
+          }
+
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body = R"({"access_token":"oauth-token-2","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        ++read_requests;
+        if (request.headers.at(0) == "Authorization: Bearer oauth-token-1") {
+          auto lock = std::unique_lock{first_wave_mutex};
+          ++first_wave_token_1_requests;
+          if (first_wave_token_1_requests < 2) {
+            first_wave_cv.wait(lock, [&] { return first_wave_token_1_requests == 2; });
+          }
+          else {
+            first_wave_cv.notify_all();
+          }
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 401,
+              .body = R"({"error":{"code":401,"message":"expired","status":"UNAUTHENTICATED"}})",
+          };
+        }
+
+        CHECK(request.headers.at(0) == "Authorization: Bearer oauth-token-2");
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body = R"({"range":"Sheet1!A1:B2","majorDimension":"ROWS","values":[["ok"]]})",
+        };
+      }};
+
+  auto future_a = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2");
+  auto future_b = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2");
+  auto const result_a = future_a.get();
+  auto const result_b = future_b.get();
+
+  REQUIRE(result_a.has_value());
+  REQUIRE(result_b.has_value());
+  CHECK(token_requests == 2);
+  CHECK(read_requests == 4);
+}
+
+TEST_CASE("service account returns the first 401 response without retry", "[client][service-account]") {
+  auto token_requests = 0;
+  auto read_requests = 0;
+  auto client = gsheetpp::detail::make_google_sheets_client_for_test(
+      gsheetpp::ServiceAccountConfig{
+          .client_email = "svc@example.iam.gserviceaccount.com",
+          .private_key = make_test_private_key(),
+          .token_uri = "https://oauth2.googleapis.com/token",
+          .project_id = "demo-project",
+      },
+      [&](gsheetpp::detail::HttpRequest const& request)
+          -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          ++token_requests;
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        ++read_requests;
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 401,
+            .body = R"({"error":{"code":401,"message":"no retry","status":"UNAUTHENTICATED"}})",
+        };
+      });
+
+  auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B2").get();
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(token_requests == 1);
+  CHECK(read_requests == 1);
+  CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::api_response);
+  CHECK(result.error().message == "no retry");
 }

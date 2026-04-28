@@ -1,186 +1,193 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <expected>
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
-/**
- * @brief Google Sheets API クライアントライブラリのメイン名前空間
- */
 namespace gsheetpp {
 
-/**
- * @brief クライアント API によって発生するエラーのカテゴリ
- */
 enum class GoogleSheetsErrorKind {
-  configuration,  ///< 設定ミス（必須フィールドの欠如など）
-  serialization,  ///< JSON のシリアライズ/デシリアライズ失敗
-  jwt_signing,    ///< JWT の署名失敗
-  network,        ///< ネットワーク接続エラー
-  http,           ///< HTTP エラー（4xx, 5xx）
-  authentication, ///< 認証失敗（トークン取得エラーなど）
-  api_response,   ///< Google Sheets API からのエラーレスポンス
+  configuration,
+  serialization,
+  jwt_signing,
+  network,
+  http,
+  authentication,
+  api_response,
 };
 
-/**
- * @brief API ヘルパーによって返される構造化されたエラー情報
- */
 struct GoogleSheetsError {
-  GoogleSheetsErrorKind kind{GoogleSheetsErrorKind::configuration}; ///< エラーの種類
-  std::string message{};                                            ///< エラーメッセージ
-  std::optional<long> http_status{};                                ///< HTTP ステータスコード（存在する場合）
-  std::string response_body{};                                      ///< レスポンスボディ（存在する場合）
+  GoogleSheetsErrorKind kind{GoogleSheetsErrorKind::configuration};
+  std::string message{};
+  std::optional<long> http_status{};
+  std::string response_body{};
 };
 
-/**
- * @brief Google Cloud の JSON 認証情報から抽出されたサービスアカウント設定
- */
+struct ApiKeyAuth {
+  std::string api_key{};
+};
+
 struct ServiceAccountConfig {
-  std::string client_email{}; ///< サービスアカウントのメールアドレス
-  std::string private_key{};  ///< RSA 非公開鍵
-  std::string token_uri{};    ///< OAuth2 トークンエンドポイント
-  std::string project_id{};   ///< プロジェクト ID
+  std::string client_email{};
+  std::string private_key{};
+  std::string token_uri{};
+  std::string project_id{};
 };
 
-/**
- * @brief OAuth2 アクセストークンの情報
- */
+using ServiceAccountAuth = ServiceAccountConfig;
+
+struct UserOAuth2Auth {
+  std::string client_id{};
+  std::string client_secret{};
+  std::string token_uri{"https://oauth2.googleapis.com/token"};
+  std::string redirect_uri{};
+  std::vector<std::string> scopes{};
+  std::string authorization_code{};
+  std::string refresh_token{};
+  mutable std::shared_ptr<std::mutex> refresh_token_mutex{std::make_shared<std::mutex>()};
+
+  auto current_refresh_token() const -> std::string {
+    auto _ = std::scoped_lock{ensure_refresh_token_mutex()};
+    return refresh_token;
+  }
+
+  auto set_refresh_token(std::string value) -> void {
+    auto _ = std::scoped_lock{ensure_refresh_token_mutex()};
+    refresh_token = std::move(value);
+  }
+
+ private:
+  auto ensure_refresh_token_mutex() const -> std::mutex& {
+    if (!refresh_token_mutex) {
+      refresh_token_mutex = std::make_shared<std::mutex>();
+    }
+    return *refresh_token_mutex;
+  }
+};
+
 struct TokenInfo {
-  std::string access_token{};  ///< アクセストークン文字列
-  std::string token_type{};    ///< トークンの種類（通常は Bearer）
-  long expires_in_seconds{};   ///< 有効期限（秒）
+  std::string access_token{};
+  std::string token_type{};
+  long expires_in_seconds{};
 };
 
-/**
- * @brief Google Sheets から返される値の範囲の読み取り結果
- */
 struct ReadValuesResult {
-  std::string range{};                           ///< 読み取った範囲（A1 表記）
-  std::string major_dimension{};                 ///< 主要な次元（ROWS または COLUMNS）
-  std::vector<std::vector<std::string>> values{}; ///< 読み取った値（2次元配列）
+  std::string range{};
+  std::string major_dimension{};
+  std::vector<std::vector<std::string>> values{};
 };
 
-/**
- * @brief Google Sheets に値を書き込んだ際の結果概要
- */
 struct WriteValuesResult {
-  std::string spreadsheet_id{}; ///< 対象のスプレッドシート ID
-  std::string updated_range{};  ///< 更新された範囲（A1 表記）
-  long updated_rows{};          ///< 更新された行数
-  long updated_columns{};       ///< 更新された列数
-  long updated_cells{};         ///< 更新されたセル総数
+  std::string spreadsheet_id{};
+  std::string updated_range{};
+  long updated_rows{};
+  long updated_columns{};
+  long updated_cells{};
 };
 
 namespace detail {
 
-/**
- * @brief 内部で使用される HTTP リクエストの構造
- */
 struct HttpRequest {
-  std::string method{};              ///< HTTP メソッド (GET, POST, PUT など)
-  std::string url{};                 ///< ターゲット URL
-  std::vector<std::string> headers{}; ///< HTTP ヘッダーリスト
-  std::string body{};                ///< リクエストボディ
+  std::string method{};
+  std::string url{};
+  std::vector<std::string> headers{};
+  std::string body{};
 };
 
-/**
- * @brief 内部で使用される HTTP レスポンスの構造
- */
 struct HttpResponse {
-  long status_code{};  ///< HTTP ステータスコード
-  std::string body{};  ///< レスポンスボディ
+  long status_code{};
+  std::string body{};
 };
 
-/**
- * @brief HTTP トランスポート関数の型定義
- */
 using TransportFunction =
     std::function<std::expected<HttpResponse, GoogleSheetsError>(HttpRequest const&)>;
 
-/**
- * @brief 時計関数の型定義（テスト用）
- */
 using ClockFunction = std::function<std::chrono::system_clock::time_point()>;
+
+struct ClientSharedState {
+  std::mutex mutex{};
+  std::condition_variable cv{};
+  bool refresh_in_progress{};
+  std::optional<TokenInfo> token{};
+  std::optional<std::string> refresh_token{};
+  std::chrono::system_clock::time_point expires_at{};
+};
 
 }  // namespace detail
 
-/**
- * @brief サービスアカウント JWT 認証を使用した非同期 Google Sheets API クライアント
- */
-class GoogleSheetsClient {
- public:
-  /**
-   * @brief デフォルトの libcurl トランスポートを使用してクライアントを構築します
-   * @param config サービスアカウントの設定情報
-   */
-  explicit GoogleSheetsClient(ServiceAccountConfig config);
+template <class T>
+concept Authenticator = std::same_as<std::remove_cvref_t<T>, ApiKeyAuth> ||
+                        std::same_as<std::remove_cvref_t<T>, ServiceAccountConfig> ||
+                        std::same_as<std::remove_cvref_t<T>, UserOAuth2Auth>;
 
-  /**
-   * @brief 依存関係を注入してクライアントを構築します（主にテスト用）
-   * @param config サービスアカウントの設定情報
-   * @param transport HTTP トランスポートのコールバック
-   * @param clock 有効期限管理に使用する時計のコールバック
-   */
-  GoogleSheetsClient(
-      ServiceAccountConfig config,
+template <Authenticator Auth>
+class BasicGoogleSheetsClient;
+
+template <Authenticator Auth>
+class BasicGoogleSheetsClient {
+ public:
+  explicit BasicGoogleSheetsClient(Auth auth);
+  BasicGoogleSheetsClient(
+      Auth auth,
       detail::TransportFunction transport,
       detail::ClockFunction clock = {});
 
-  /**
-   * @brief 非同期に認証を行い、OAuth2 アクセストークンを取得・キャッシュします
-   * @return TokenInfo または GoogleSheetsError を含む std::future
-   */
-  auto authenticate_async() -> std::future<std::expected<TokenInfo, GoogleSheetsError>>;
+  template <Authenticator OtherAuth>
+  auto set_authenticator(OtherAuth auth) const -> BasicGoogleSheetsClient<OtherAuth>;
 
-  /**
-   * @brief スプレッドシートから値の範囲を非同期に読み取ります
-   * @param spreadsheet_id 対象のスプレッドシート ID
-   * @param range A1 表記の範囲（例: "Sheet1!A1:B10"）
-   * @return ReadValuesResult または GoogleSheetsError を含む std::future
-   */
+  auto authenticate_async() -> std::future<std::expected<TokenInfo, GoogleSheetsError>>;
   auto read_values_async(std::string_view spreadsheet_id, std::string_view range)
       -> std::future<std::expected<ReadValuesResult, GoogleSheetsError>>;
-
-  /**
-   * @brief スプレッドシートの範囲に値を非同期に書き込みます（RAW モードを使用）
-   * @param spreadsheet_id 対象のスプレッドシート ID
-   * @param range A1 表記の範囲
-   * @param data 書き込むデータ（行優先の2次元配列）
-   * @return WriteValuesResult または GoogleSheetsError を含む std::future
-   */
   auto write_values_async(
       std::string_view spreadsheet_id,
       std::string_view range,
       std::span<std::vector<std::string> const> data)
       -> std::future<std::expected<WriteValuesResult, GoogleSheetsError>>;
 
+  auto authenticator() -> Auth& {
+    return *auth_;
+  }
+
+  auto authenticator() const -> Auth const& {
+    return *auth_;
+  }
+
  private:
-  struct SharedState;
+  auto prepare_request(detail::HttpRequest& request, bool is_write)
+      -> std::expected<void, GoogleSheetsError>;
+  auto execute_request(detail::HttpRequest request, bool retry_on_unauthorized)
+      -> std::expected<detail::HttpResponse, GoogleSheetsError>;
 
-  auto do_token_fetch() -> std::expected<TokenInfo, GoogleSheetsError>;
-  auto refresh_token() -> std::expected<TokenInfo, GoogleSheetsError>;
-  auto get_valid_token() -> std::expected<TokenInfo, GoogleSheetsError>;
-
-  ServiceAccountConfig config_{};
+  std::shared_ptr<Auth> auth_{};
   detail::TransportFunction transport_{};
   detail::ClockFunction clock_{};
-  std::shared_ptr<SharedState> shared_state_{};
+  std::shared_ptr<detail::ClientSharedState> shared_state_{};
 };
 
-/**
- * @brief Google サービスアカウントの認証情報 JSON 文字列をパースします
- * @param json サービスアカウント情報を含む UTF-8 JSON 文字列
- * @return パースされた ServiceAccountConfig または GoogleSheetsError
- */
+using GoogleSheetsClient = BasicGoogleSheetsClient<ServiceAccountConfig>;
+
+template <class Auth>
+BasicGoogleSheetsClient(Auth) -> BasicGoogleSheetsClient<Auth>;
+
+template <class Auth, class Transport>
+BasicGoogleSheetsClient(Auth, Transport&&, detail::ClockFunction = {})
+    -> BasicGoogleSheetsClient<Auth>;
+
 auto parse_service_account_config(std::string_view json)
     -> std::expected<ServiceAccountConfig, GoogleSheetsError>;
 
 }  // namespace gsheetpp
+
+#include "gsheetpp/google_sheets_client_impl.hpp"

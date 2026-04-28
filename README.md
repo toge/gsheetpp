@@ -1,97 +1,116 @@
 # gsheetpp
 
-gsheetpp は、サービスアカウントを使用した JWT 認証をサポートする、モダンな C++ 用の Google Sheets API クライアントライブラリです。
+gsheetpp は、Google Sheets API v4 を扱うモダンな C++ 用クライアントライブラリです。  
+`ApiKeyAuth`、`ServiceAccountAuth`、`UserOAuth2Auth` の 3 認証方式を 1 つの API で扱えます。
 
 ## 特徴
 
-- **モダン C++**: C++23 (`std::expected`, `std::future`, `std::span` 等) を活用したクリーンな API。
-- **非同期 API**: ネットワーク通信を非同期で行い、`std::future` を通じて結果を返します。
-- **JWT 認証**: Google Cloud サービスアカウントの JSON 鍵ファイルを使用した、安全なサーバー間認証。
-- **型安全なエラーハンドリング**: `std::expected` を使用した、詳細なエラー情報。
-- **最小限の依存関係**: `libcurl`, `glaze`, `jwt-cpp` を使用。
+- **非同期 API**: すべての通信を `std::future` 経由で実行
+- **型安全なエラー処理**: `std::expected` で成功/失敗を明示
+- **認証方式の切り替え**: `set_authenticator(...)` で別の認証モデルへ再束縛
+- **JWT サービスアカウント認証**: `jwt-cpp` と OpenSSL による RS256 署名
+- **OAuth2 自動更新**: User OAuth2 は 401 応答時に 1 回だけ自動 refresh & retry
 
 ## 依存ライブラリ
 
-このライブラリは以下のパッケージに依存しています（vcpkg 経由での利用を推奨）:
+- `curl`
+- `glaze`
+- `jwt-cpp`
+- `nlohmann-json`
+- `openssl`
 
-- `curl`: HTTP 通信
-- `glaze`: JSON シリアライズ/デシリアライズ
-- `jwt-cpp`: JWT の作成と署名
-- `nlohmann-json`: jwt-cpp の内部使用
-- `openssl`: 暗号化処理
-
-## セットアップ
-
-### 1. Google Cloud プロジェクトの設定
-
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成します。
-2. "Google Sheets API" を有効にします。
-3. "認証情報" -> "認証情報を作成" -> "サービスアカウント" を選択し、サービスアカウントを作成します。
-4. 作成したサービスアカウントの "キー" タブで、"鍵を追加" -> "新しい鍵を作成" (JSON) を選択し、ファイルをダウンロードします。
-5. 操作したいスプレッドシートを、作成したサービスアカウントのメールアドレスと共有します（閲覧/編集権限を付与）。
-
-### 2. ビルド方法
-
-CMake と vcpkg を使用したビルド例：
+## ビルド
 
 ```bash
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=[vcpkg_path]/scripts/buildsystems/vcpkg.cmake
 cmake --build build
+cd build && ctest -V
 ```
 
-## 使用方法
+## 認証方式
+
+| 認証方式 | 用途 | 挙動 |
+| --- | --- | --- |
+| `ApiKeyAuth` | 公開スプレッドシートの read-only | `key=` クエリを付与。write は即エラー |
+| `ServiceAccountAuth` | サーバー間通信 | JWT bearer token を取得して `Authorization` ヘッダーを付与 |
+| `UserOAuth2Auth` | ユーザー委譲アクセス | アクセストークンを保持し、401 で 1 回だけ refresh & retry |
+
+### API Key
 
 ```cpp
 #include "gsheetpp/google_sheets_client.hpp"
-#include <iostream>
 
-int main() {
-  // 1. サービスアカウントの設定を読み込む
-  std::string json_content = /* 鍵ファイルの内容を読み込む */;
-  auto config = gsheetpp::parse_service_account_config(json_content);
-  if (!config) {
-    std::cerr << "設定のパースに失敗: " << config.error().message << std::endl;
-    return 1;
+auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>{
+  gsheetpp::ApiKeyAuth{
+    .api_key = "AIza...",
   }
+};
 
-  // 2. クライアントの作成
-  gsheetpp::GoogleSheetsClient client{*config};
+auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B10").get();
+```
 
-  // 3. 値の読み取り (非同期)
-  auto spreadsheet_id = "your_spreadsheet_id_here";
-  auto read_future = client.read_values_async(spreadsheet_id, "Sheet1!A1:B10");
-  
-  auto result = read_future.get(); // 非同期完了を待機
-  if (result) {
-    for (const auto& row : result->values) {
-      for (const auto& cell : row) {
-        std::cout << cell << ", ";
-      }
-      std::cout << std::endl;
-    }
-  } else {
-    std::cerr << "読み取りエラー: " << result.error().message << std::endl;
-  }
+API key は公開シートの読み取り専用です。`write_values_async()` は `configuration` エラーを返します。  
+`authenticate_async()` は no-op success で、実際の検証は `read_values_async()` 側で行われます。
 
-  // 4. 値の書き込み (非同期)
-  std::vector<std::vector<std::string>> data = {
-    {"Name", "Age"},
-    {"Alice", "30"},
-    {"Bob", "25"}
-  };
-  auto write_future = client.write_values_async(spreadsheet_id, "Sheet1!A1", data);
-  
-  auto write_result = write_future.get();
-  if (write_result) {
-    std::cout << "更新成功: " << write_result->updated_cells << " セルが更新されました。" << std::endl;
-  } else {
-    std::cerr << "書き込みエラー: " << write_result.error().message << std::endl;
-  }
+### Service Account
 
-  return 0;
+```cpp
+#include "gsheetpp/google_sheets_client.hpp"
+
+auto const json = std::string{/* service account json */};
+auto config = gsheetpp::parse_service_account_config(json);
+if (!config) {
+  return 1;
 }
+
+auto client = gsheetpp::GoogleSheetsClient{*config};
+auto read_result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B10").get();
+```
+
+対象シートはサービスアカウントのメールアドレスに共有されている必要があります。
+
+### User OAuth2
+
+```cpp
+#include "gsheetpp/google_sheets_client.hpp"
+
+auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::UserOAuth2Auth>{
+  gsheetpp::UserOAuth2Auth{
+    .client_id = "client-id",
+    .client_secret = "client-secret",
+    .redirect_uri = "http://127.0.0.1/callback",
+    .scopes = {"https://www.googleapis.com/auth/spreadsheets"},
+    .authorization_code = "authorization-code"
+  }
+};
+
+auto auth_result = client.authenticate_async().get();
+if (!auth_result) {
+  return 1;
+}
+
+auto const refresh_token = client.authenticator().current_refresh_token();
+auto read_result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B10").get();
+```
+
+`UserOAuth2Auth` は confidential-client 前提です。ブラウザ起動やローカル callback server はこのライブラリの対象外です。  
+認可コード取得後のトークン交換、refresh token 保持、401 時の 1 回だけの自動再試行を担当します。
+
+## 補足
+
+`set_authenticator(...)` は transport / clock の注入設定を引き継ぎますが、認証キャッシュ状態は新しい client に持ち越しません。
+
+## Example
+
+`examples/main.cpp` は 4 モードを持ちます。
+
+```bash
+gsheetpp_example api-key <api-key> <spreadsheet-id> <read-range>
+gsheetpp_example service-account <service-account.json> <spreadsheet-id> <read-range> <write-range> <write-values-json>
+gsheetpp_example oauth-code <client-id> <client-secret> <redirect-uri> <authorization-code> <spreadsheet-id> <read-range> <write-range> <write-values-json>
+gsheetpp_example oauth-refresh <client-id> <client-secret> <refresh-token> <spreadsheet-id> <read-range> <write-range> <write-values-json>
 ```
 
 ## ライセンス
 
-このプロジェクトは MIT ライセンスの下で公開されています。
+MIT
