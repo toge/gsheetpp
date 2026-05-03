@@ -122,6 +122,14 @@ struct TokenInfo {
 };
 
 /**
+ * @brief スプレッドシート内の各シート（タブ）の情報を保持します。
+ */
+struct SheetMetadata {
+  std::string title{};     ///< シートのタイトル（タブ名）です。
+  int         sheet_id{};  ///< シートの一意な識別子です。
+};
+
+/**
  * @brief values.get 応答を保持します。
  */
 struct ReadValuesResult {
@@ -228,6 +236,13 @@ class BasicGoogleSheetsClient {
    * @return 成功時は TokenInfo、失敗時は GoogleSheetsError を返す future です。
    */
   auto authenticate_async() -> std::future<std::expected<TokenInfo, GoogleSheetsError>>;
+
+  /**
+   * @brief スプレッドシート内のシート（タブ）一覧を非同期で取得します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @return 成功時は SheetMetadata のリスト、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto get_sheets_async(std::string_view spreadsheet_id) -> std::future<std::expected<std::vector<SheetMetadata>, GoogleSheetsError>>;
 
   /**
    * @brief 指定レンジの値を非同期で取得します。

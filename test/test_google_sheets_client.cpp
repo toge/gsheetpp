@@ -263,6 +263,34 @@ TEST_CASE("write values response is parsed", "[responses]") {
   CHECK(parsed->updated_cells == 4);
 }
 
+TEST_CASE("get_sheets_response is parsed", "[responses]") {
+  auto const json = R"({
+    "sheets": [
+      {
+        "properties": {
+          "sheetId": 0,
+          "title": "Sheet1"
+        }
+      },
+      {
+        "properties": {
+          "sheetId": 12345,
+          "title": "Data"
+        }
+      }
+    ]
+  })";
+
+  auto parsed = gsheetpp::detail::parse_get_sheets_response(json);
+
+  REQUIRE(parsed.has_value());
+  REQUIRE(parsed->size() == 2);
+  CHECK(parsed->at(0).title == "Sheet1");
+  CHECK(parsed->at(0).sheet_id == 0);
+  CHECK(parsed->at(1).title == "Data");
+  CHECK(parsed->at(1).sheet_id == 12345);
+}
+
 TEST_CASE("malformed JSON becomes serialization error", "[responses]") {
   auto parsed = gsheetpp::detail::parse_read_values_response("{");
 
@@ -413,6 +441,50 @@ TEST_CASE("read_values_async auto-authenticates when no cached token exists", "[
   REQUIRE(result.has_value());
   CHECK(token_requests == 1);
   CHECK(read_requests == 1);
+}
+
+TEST_CASE("get_sheets_async returns sheet metadata from transport", "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key  = make_test_private_key(),
+      .token_uri    = "https://oauth2.googleapis.com/token",
+      .project_id   = "demo-project",
+  };
+
+  auto client =
+      gsheetpp::detail::make_google_sheets_client_for_test(config, [](gsheetpp::detail::HttpRequest const& request) -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body        = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        CHECK(request.method == "GET");
+        CHECK(request.url.find("/spreadsheets/spreadsheet-id") != std::string::npos);
+        // fields=sheets(properties(title,sheetId)) is percent-encoded
+        CHECK(request.url.find("fields=sheets%28properties%28title%2CsheetId%29%29") != std::string::npos);
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body        = R"({
+              "sheets": [
+                {
+                  "properties": {
+                    "sheetId": 0,
+                    "title": "Sheet1"
+                  }
+                }
+              ]
+            })",
+        };
+      });
+
+  auto result = client.get_sheets_async("spreadsheet-id").get();
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->size() == 1);
+  CHECK(result->at(0).title == "Sheet1");
+  CHECK(result->at(0).sheet_id == 0);
 }
 
 TEST_CASE("write_values_async uses RAW input option", "[client]") {

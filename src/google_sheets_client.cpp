@@ -57,6 +57,15 @@ struct meta<gsheetpp::detail::OAuthTokenResponse> {
       "refresh_token", &T::refresh_token);
 };
 
+template <>
+struct meta<gsheetpp::SheetMetadata> {
+  using T = gsheetpp::SheetMetadata;
+
+  static constexpr auto value = object(
+      "title", &T::title,
+      "sheetId", &T::sheet_id);
+};
+
 }  // namespace glz
 
 namespace gsheetpp {
@@ -88,6 +97,16 @@ namespace {
     long        updatedRows{};
     long        updatedColumns{};
     long        updatedCells{};
+  };
+
+  /**
+   * @brief spreadsheets.get 応答 JSON を受ける一時構造体です。
+   */
+  struct SpreadsheetPayload {
+    struct SheetPayload {
+      SheetMetadata properties{};
+    };
+    std::vector<SheetPayload> sheets{};
   };
 
   /**
@@ -565,6 +584,26 @@ namespace detail {
   }
 
   /**
+   * @brief spreadsheets.get 応答を SheetMetadata のリストに変換します。
+   * @param json 応答 JSON です。
+   * @return 成功時は SheetMetadata のリスト、失敗時は GoogleSheetsError です。
+   */
+  auto parse_get_sheets_response(std::string_view json) -> std::expected<std::vector<SheetMetadata>, GoogleSheetsError> {
+    auto payload = parse_json<SpreadsheetPayload>(json, "failed to parse spreadsheet response");
+    if (!payload) {
+      return std::unexpected{payload.error()};
+    }
+
+    auto results = std::vector<SheetMetadata>{};
+    results.reserve(payload->sheets.size());
+    for (auto& sheet : payload->sheets) {
+      results.push_back(std::move(sheet.properties));
+    }
+
+    return results;
+  }
+
+  /**
    * @brief Google API 標準エラー応答から message を抽出します。
    * @param json エラー応答 JSON です。
    * @return 成功時は message、失敗時は GoogleSheetsError です。
@@ -662,6 +701,23 @@ namespace detail {
     percent_encode(spreadsheet_id, url);
     url += "/values/";
     percent_encode(range, url);
+    if (!query.empty()) {
+      url += '?';
+      url += query;
+    }
+    return url;
+  }
+
+  /**
+   * @brief Google Sheets spreadsheet API の URL を生成します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param query 任意の追加クエリです。
+   * @return 組み立て済み URL です。
+   */
+  auto build_spreadsheet_url(std::string_view spreadsheet_id, std::string_view query) -> std::string {
+    auto url = std::string{"https://sheets.googleapis.com/v4/spreadsheets/"};
+    url.reserve(url.size() + (spreadsheet_id.size() * 3) + (query.empty() ? std::size_t{0} : (std::size_t{1} + query.size())));
+    percent_encode(spreadsheet_id, url);
     if (!query.empty()) {
       url += '?';
       url += query;

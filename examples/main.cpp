@@ -75,9 +75,26 @@ auto run_write(
   return true;
 }
 
+auto run_list_sheets(
+    auto& client,
+    std::string_view spreadsheet_id) -> bool {
+  auto result = client.get_sheets_async(spreadsheet_id).get();
+  if (!result) {
+    print_error(result.error());
+    return false;
+  }
+
+  std::cout << "sheets in spreadsheet: " << spreadsheet_id << '\n';
+  for (auto const& sheet : *result) {
+    std::cout << "  - " << sheet.title << " (id: " << sheet.sheet_id << ")\n";
+  }
+  return true;
+}
+
 auto print_usage() -> void {
   std::cerr
       << "usage:\n"
+      << "  gsheetpp_example list-sheets <api-key> <spreadsheet-id>\n"
       << "  gsheetpp_example api-key <api-key> <spreadsheet-id> <read-range>\n"
       << "  gsheetpp_example service-account <service-account.json> <spreadsheet-id> "
          "<read-range> <write-range> <write-values-json>\n"
@@ -97,6 +114,19 @@ auto main(int argc, char** argv) -> int {
   }
 
   auto const mode = std::string_view{argv[1]};
+  if (mode == "list-sheets") {
+    if (argc != 4) {
+      print_usage();
+      return 1;
+    }
+
+    auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>{
+        gsheetpp::ApiKeyAuth{
+            .api_key = argv[2],
+        }};
+    return run_list_sheets(client, argv[3]) ? 0 : 1;
+  }
+
   if (mode == "api-key") {
     if (argc != 5) {
       print_usage();

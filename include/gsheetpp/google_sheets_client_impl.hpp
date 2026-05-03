@@ -91,6 +91,13 @@ private:
   auto parse_write_values_response(std::string_view json) -> std::expected<WriteValuesResult, GoogleSheetsError>;
 
   /**
+   * @brief spreadsheets.get 応答を SheetMetadata のリストに変換します。
+   * @param json Google Sheets API 応答 JSON です。
+   * @return 成功時は SheetMetadata のリスト、失敗時は GoogleSheetsError です。
+   */
+  auto parse_get_sheets_response(std::string_view json) -> std::expected<std::vector<SheetMetadata>, GoogleSheetsError>;
+
+  /**
    * @brief Google API 標準エラー応答から message を取り出します。
    * @param json エラー応答 JSON です。
    * @return 成功時は message、失敗時は GoogleSheetsError です。
@@ -142,6 +149,14 @@ private:
    * @return 組み立て済み URL です。
    */
   auto build_values_url(std::string_view spreadsheet_id, std::string_view range, std::string_view query = {}) -> std::string;
+
+  /**
+   * @brief spreadsheet API エンドポイント URL を組み立てます。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param query 付加したいクエリ文字列です。
+   * @return 組み立て済み URL です。
+   */
+  auto build_spreadsheet_url(std::string_view spreadsheet_id, std::string_view query = {}) -> std::string;
 
   /**
    * @brief URL にクエリパラメータを安全に追加します。
@@ -239,6 +254,52 @@ auto BasicGoogleSheetsClient<Auth>::authenticate_async() -> std::future<std::exp
     } else {
       return detail::get_valid_token(*client.auth_, client.shared_state_, client.transport_, client.clock_);
     }
+  });
+}
+
+template <Authenticator Auth>
+/**
+ * @brief spreadsheets.get を非同期実行してシート一覧を取得します。
+ * @param spreadsheet_id 対象スプレッドシート ID です。
+ * @return 成功時は SheetMetadata のリスト、失敗時は GoogleSheetsError を返す future です。
+ */
+auto BasicGoogleSheetsClient<Auth>::get_sheets_async(std::string_view spreadsheet_id) -> std::future<std::expected<std::vector<SheetMetadata>, GoogleSheetsError>> {
+  auto const spreadsheet = std::string{spreadsheet_id};
+  return std::async(std::launch::async, [client = *this, spreadsheet]() mutable -> std::expected<std::vector<SheetMetadata>, GoogleSheetsError> {
+    auto url     = detail::build_spreadsheet_url(spreadsheet);
+    url          = detail::append_query_parameter(std::move(url), "fields", "sheets(properties(title,sheetId))");
+    auto request = detail::HttpRequest{
+        .method = "GET",
+        .url    = std::move(url),
+    };
+    auto prepared = client.prepare_request(request, false);
+    if (!prepared) {
+      return std::unexpected{prepared.error()};
+    }
+
+    auto response = client.execute_request(std::move(request), true);
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto api_error = detail::parse_api_error_response(response->body);
+      if (!api_error) {
+        return std::unexpected{GoogleSheetsError{
+            .kind          = GoogleSheetsErrorKind::http,
+            .message       = "google sheets request failed",
+            .http_status   = response->status_code,
+            .response_body = response->body,
+        }};
+      }
+      return std::unexpected{GoogleSheetsError{
+          .kind          = GoogleSheetsErrorKind::api_response,
+          .message       = api_error->empty() ? "google api request failed" : *api_error,
+          .http_status   = response->status_code,
+          .response_body = response->body,
+      }};
+    }
+
+    return detail::parse_get_sheets_response(response->body);
   });
 }
 
