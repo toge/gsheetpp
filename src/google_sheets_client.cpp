@@ -5,7 +5,6 @@
 
 #include <glaze/glaze.hpp>
 #include <jwt-cpp/traits/nlohmann-json/defaults.h>
-#include <nlohmann/json.hpp>
 
 #include <cctype>
 #include <format>
@@ -15,8 +14,6 @@
  * @file google_sheets_client.cpp
  * @brief Google Sheets クライアントの内部処理を実装します。
  */
-
-using json = nlohmann::json;
 
 namespace gsheetpp {
 
@@ -101,6 +98,68 @@ struct BatchUpdatePayload {
  */
 struct DriveFilesPayload {
   std::vector<DriveFile> files{};
+};
+
+/**
+ * @brief セル書式設定用の内部構造体です。
+ */
+struct ColorPayload {
+  float red{};
+  float green{};
+  float blue{};
+};
+
+struct TextFormatPayload {
+  std::optional<ColorPayload> foregroundColor{};
+  std::optional<bool>         bold{};
+};
+
+struct UserEnteredFormatPayload {
+  std::optional<ColorPayload>      backgroundColor{};
+  std::optional<TextFormatPayload> textFormat{};
+};
+
+struct CellPayload {
+  std::optional<UserEnteredFormatPayload> userEnteredFormat{};
+};
+
+struct GridRangePayload {
+  int                sheetId{};
+  std::optional<int> startRowIndex{};
+  std::optional<int> endRowIndex{};
+  std::optional<int> startColumnIndex{};
+  std::optional<int> endColumnIndex{};
+};
+
+struct RepeatCellPayload {
+  GridRangePayload range{};
+  CellPayload      cell{};
+  std::string      fields{};
+};
+
+/**
+ * @brief シートプロパティ更新用の内部構造体です。
+ */
+struct UpdateSheetPropertiesPayload {
+  struct Properties {
+    int sheetId{};
+    struct GridProperties {
+      std::optional<int> frozenRowCount{};
+      std::optional<int> frozenColumnCount{};
+    } gridProperties{};
+  } properties{};
+  std::string fields{};
+};
+
+/**
+ * @brief batchUpdate 全体のリクエスト構造体（汎用）です。
+ */
+struct BatchUpdateRequestsPayload {
+  struct Request {
+    std::optional<RepeatCellPayload>            repeatCell{};
+    std::optional<UpdateSheetPropertiesPayload> updateSheetProperties{};
+  };
+  std::vector<Request> requests{};
 };
 
 /**
@@ -268,6 +327,95 @@ template <>
 struct meta<gsheetpp::BatchUpdatePayload> {
   using T = gsheetpp::BatchUpdatePayload;
   static constexpr auto value = object("replies", &T::replies);
+};
+
+template <>
+struct meta<gsheetpp::ColorPayload> {
+  using T = gsheetpp::ColorPayload;
+  static constexpr auto value = object(
+      "red", &T::red,
+      "green", &T::green,
+      "blue", &T::blue);
+};
+
+template <>
+struct meta<gsheetpp::TextFormatPayload> {
+  using T = gsheetpp::TextFormatPayload;
+  static constexpr auto value = object(
+      "foregroundColor", &T::foregroundColor,
+      "bold", &T::bold);
+};
+
+template <>
+struct meta<gsheetpp::UserEnteredFormatPayload> {
+  using T = gsheetpp::UserEnteredFormatPayload;
+  static constexpr auto value = object(
+      "backgroundColor", &T::backgroundColor,
+      "textFormat", &T::textFormat);
+};
+
+template <>
+struct meta<gsheetpp::CellPayload> {
+  using T = gsheetpp::CellPayload;
+  static constexpr auto value = object("userEnteredFormat", &T::userEnteredFormat);
+};
+
+template <>
+struct meta<gsheetpp::GridRangePayload> {
+  using T = gsheetpp::GridRangePayload;
+  static constexpr auto value = object(
+      "sheetId", &T::sheetId,
+      "startRowIndex", &T::startRowIndex,
+      "endRowIndex", &T::endRowIndex,
+      "startColumnIndex", &T::startColumnIndex,
+      "endColumnIndex", &T::endColumnIndex);
+};
+
+template <>
+struct meta<gsheetpp::RepeatCellPayload> {
+  using T = gsheetpp::RepeatCellPayload;
+  static constexpr auto value = object(
+      "range", &T::range,
+      "cell", &T::cell,
+      "fields", &T::fields);
+};
+
+template <>
+struct meta<gsheetpp::UpdateSheetPropertiesPayload::Properties::GridProperties> {
+  using T = gsheetpp::UpdateSheetPropertiesPayload::Properties::GridProperties;
+  static constexpr auto value = object(
+      "frozenRowCount", &T::frozenRowCount,
+      "frozenColumnCount", &T::frozenColumnCount);
+};
+
+template <>
+struct meta<gsheetpp::UpdateSheetPropertiesPayload::Properties> {
+  using T = gsheetpp::UpdateSheetPropertiesPayload::Properties;
+  static constexpr auto value = object(
+      "sheetId", &T::sheetId,
+      "gridProperties", &T::gridProperties);
+};
+
+template <>
+struct meta<gsheetpp::UpdateSheetPropertiesPayload> {
+  using T = gsheetpp::UpdateSheetPropertiesPayload;
+  static constexpr auto value = object(
+      "properties", &T::properties,
+      "fields", &T::fields);
+};
+
+template <>
+struct meta<gsheetpp::BatchUpdateRequestsPayload::Request> {
+  using T = gsheetpp::BatchUpdateRequestsPayload::Request;
+  static constexpr auto value = object(
+      "repeatCell", &T::repeatCell,
+      "updateSheetProperties", &T::updateSheetProperties);
+};
+
+template <>
+struct meta<gsheetpp::BatchUpdateRequestsPayload> {
+  using T = gsheetpp::BatchUpdateRequestsPayload;
+  static constexpr auto value = object("requests", &T::requests);
 };
 
 }  // namespace glz
@@ -896,33 +1044,37 @@ namespace detail {
   /**
    * @brief values.update 用 JSON 本文を生成します。
    * @param values 書き込むセル値一覧です。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_write_values_request_body(std::span<std::vector<std::string> const> values) -> std::string {
+  auto build_write_values_request_body(std::span<std::vector<std::string> const> values) -> std::expected<std::string, GoogleSheetsError> {
     auto json = std::string{};
-    std::ignore = glz::write_json(glz::obj{
-                     "majorDimension", "ROWS",
-                     "values", values,
-                 },
-                 json);
+    if (auto const ec = glz::write_json(glz::obj{
+                            "majorDimension", "ROWS",
+                            "values", values,
+                        },
+                        json)) {
+      return std::unexpected{make_parse_error("failed to build write values request body")};
+    }
     return json;
   }
 
   /**
    * @brief addSheet 用 JSON 本文を生成します。
    * @param title 追加するシートのタイトルです。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_add_sheet_request_body(std::string_view title) -> std::string {
-    auto json   = std::string{};
-    std::ignore = glz::write_json(glz::obj{
-                     "requests",
-                     std::vector{glz::obj{
-                         "addSheet",
-                         glz::obj{"properties", glz::obj{"title", title}},
-                     }},
-                 },
-                 json);
+  auto build_add_sheet_request_body(std::string_view title) -> std::expected<std::string, GoogleSheetsError> {
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(glz::obj{
+                            "requests",
+                            std::vector{glz::obj{
+                                "addSheet",
+                                glz::obj{"properties", glz::obj{"title", title}},
+                            }},
+                        },
+                        json)) {
+      return std::unexpected{make_parse_error("failed to build add sheet request body")};
+    }
     return json;
   }
 
@@ -930,43 +1082,47 @@ namespace detail {
    * @brief renameSheet 用 JSON 本文を生成します。
    * @param sheet_id 変更対象のシート ID です。
    * @param new_title 新しいタイトルです。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_rename_sheet_request_body(int sheet_id, std::string_view new_title) -> std::string {
-    auto json   = std::string{};
-    std::ignore = glz::write_json(glz::obj{
-                     "requests",
-                     std::vector{glz::obj{
-                         "updateSheetProperties",
-                         glz::obj{
-                             "properties",
-                             glz::obj{
-                                 "sheetId", sheet_id,
-                                 "title", new_title,
-                             },
-                             "fields", "title",
-                         },
-                     }},
-                 },
-                 json);
+  auto build_rename_sheet_request_body(int sheet_id, std::string_view new_title) -> std::expected<std::string, GoogleSheetsError> {
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(glz::obj{
+                            "requests",
+                            std::vector{glz::obj{
+                                "updateSheetProperties",
+                                glz::obj{
+                                    "properties",
+                                    glz::obj{
+                                        "sheetId", sheet_id,
+                                        "title", new_title,
+                                    },
+                                    "fields", "title",
+                                },
+                            }},
+                        },
+                        json)) {
+      return std::unexpected{make_parse_error("failed to build rename sheet request body")};
+    }
     return json;
   }
 
   /**
    * @brief deleteSheet 用 JSON 本文を生成します。
    * @param sheet_id 削除対象のシート ID です。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_delete_sheet_request_body(int sheet_id) -> std::string {
-    auto json   = std::string{};
-    std::ignore = glz::write_json(glz::obj{
-                     "requests",
-                     std::vector{glz::obj{
-                         "deleteSheet",
-                         glz::obj{"sheetId", sheet_id},
-                     }},
-                 },
-                 json);
+  auto build_delete_sheet_request_body(int sheet_id) -> std::expected<std::string, GoogleSheetsError> {
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(glz::obj{
+                            "requests",
+                            std::vector{glz::obj{
+                                "deleteSheet",
+                                glz::obj{"sheetId", sheet_id},
+                            }},
+                        },
+                        json)) {
+      return std::unexpected{make_parse_error("failed to build delete sheet request body")};
+    }
     return json;
   }
 
@@ -974,25 +1130,27 @@ namespace detail {
    * @brief reorderSheet 用 JSON 本文を生成します。
    * @param sheet_id 変更対象のシート ID です。
    * @param new_index 新しいインデックスです。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_reorder_sheet_request_body(int sheet_id, int new_index) -> std::string {
-    auto json   = std::string{};
-    std::ignore = glz::write_json(glz::obj{
-                     "requests",
-                     std::vector{glz::obj{
-                         "updateSheetProperties",
-                         glz::obj{
-                             "properties",
-                             glz::obj{
-                                 "sheetId", sheet_id,
-                                 "index", new_index,
-                             },
-                             "fields", "index",
-                         },
-                     }},
-                 },
-                 json);
+  auto build_reorder_sheet_request_body(int sheet_id, int new_index) -> std::expected<std::string, GoogleSheetsError> {
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(glz::obj{
+                            "requests",
+                            std::vector{glz::obj{
+                                "updateSheetProperties",
+                                glz::obj{
+                                    "properties",
+                                    glz::obj{
+                                        "sheetId", sheet_id,
+                                        "index", new_index,
+                                    },
+                                    "fields", "index",
+                                },
+                            }},
+                        },
+                        json)) {
+      return std::unexpected{make_parse_error("failed to build reorder sheet request body")};
+    }
     return json;
   }
 
@@ -1000,65 +1158,52 @@ namespace detail {
    * @brief repeatCell 用 JSON 本文を生成してセル書式を更新します。
    * @param range 対象のセル範囲です。
    * @param format 適用する書式設定です。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_update_cell_format_request_body(GridRange const& range, CellFormat const& format) -> std::string {
-    auto requests = json::array();
-    auto repeat   = json::object();
+  auto build_update_cell_format_request_body(GridRange const& range, CellFormat const& format) -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = BatchUpdateRequestsPayload{};
+    auto repeat  = RepeatCellPayload{
+         .range = {
+             .sheetId          = range.sheet_id,
+             .startRowIndex    = range.start_row,
+             .endRowIndex      = range.end_row,
+             .startColumnIndex = range.start_column,
+             .endColumnIndex   = range.end_column,
+        },
+    };
 
-    // Range
-    auto grid_range = json{{"sheetId", range.sheet_id}};
-    if (range.start_row) {
-      grid_range["startRowIndex"] = *range.start_row;
-    }
-    if (range.end_row) {
-      grid_range["endRowIndex"] = *range.end_row;
-    }
-    if (range.start_column) {
-      grid_range["startColumnIndex"] = *range.start_column;
-    }
-    if (range.end_column) {
-      grid_range["endColumnIndex"] = *range.end_column;
-    }
-    repeat["range"] = std::move(grid_range);
-
-    // Cell data and Fields mask
-    auto cell                = json::object();
-    auto user_entered_format = json::object();
-    auto text_format         = json::object();
     auto fields              = std::vector<std::string>{};
+    auto user_entered_format = UserEnteredFormatPayload{};
 
     if (format.background_color) {
-      user_entered_format["backgroundColor"] = {
-          {"red", format.background_color->red},
-          {"green", format.background_color->green},
-          {"blue", format.background_color->blue},
+      user_entered_format.backgroundColor = ColorPayload{
+          .red   = format.background_color->red,
+          .green = format.background_color->green,
+          .blue  = format.background_color->blue,
       };
       fields.push_back("userEnteredFormat.backgroundColor");
     }
 
-    if (format.foreground_color) {
-      text_format["foregroundColor"] = {
-          {"red", format.foreground_color->red},
-          {"green", format.foreground_color->green},
-          {"blue", format.foreground_color->blue},
-      };
-      fields.push_back("userEnteredFormat.textFormat.foregroundColor");
+    if (format.foreground_color || format.bold) {
+      auto text_format = TextFormatPayload{};
+      if (format.foreground_color) {
+        text_format.foregroundColor = ColorPayload{
+            .red   = format.foreground_color->red,
+            .green = format.foreground_color->green,
+            .blue  = format.foreground_color->blue,
+        };
+        fields.push_back("userEnteredFormat.textFormat.foregroundColor");
+      }
+      if (format.bold) {
+        text_format.bold = *format.bold;
+        fields.push_back("userEnteredFormat.textFormat.bold");
+      }
+      user_entered_format.textFormat = text_format;
     }
 
-    if (format.bold) {
-      text_format["bold"] = *format.bold;
-      fields.push_back("userEnteredFormat.textFormat.bold");
+    if (user_entered_format.backgroundColor || user_entered_format.textFormat) {
+      repeat.cell.userEnteredFormat = user_entered_format;
     }
-
-    if (!text_format.empty()) {
-      user_entered_format["textFormat"] = std::move(text_format);
-    }
-    if (!user_entered_format.empty()) {
-      cell["userEnteredFormat"] = std::move(user_entered_format);
-    }
-
-    repeat["cell"]   = std::move(cell);
 
     auto fields_str = std::string{};
     for (size_t i = 0; i < fields.size(); ++i) {
@@ -1067,11 +1212,15 @@ namespace detail {
         fields_str += ",";
       }
     }
-    repeat["fields"] = fields_str;
+    repeat.fields = fields_str;
 
-    requests.push_back({{"repeatCell", std::move(repeat)}});
+    payload.requests.push_back(BatchUpdateRequestsPayload::Request{.repeatCell = std::move(repeat)});
 
-    return json{{"requests", std::move(requests)}}.dump();
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build update cell format request body")};
+    }
+    return json;
   }
 
   /**
@@ -1079,34 +1228,35 @@ namespace detail {
    * @param sheet_id 対象のシート ID です。
    * @param frozen_row_count 固定する行数です。
    * @param frozen_column_count 固定する列数です。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_freeze_panes_request_body(int sheet_id, int frozen_row_count, int frozen_column_count) -> std::string {
-    auto requests = json::array();
-    requests.push_back({
-        {"updateSheetProperties",
-         {
-             {"properties",
-              {
-                  {"sheetId", sheet_id},
-                  {"gridProperties",
-                   {
-                       {"frozenRowCount", frozen_row_count},
-                       {"frozenColumnCount", frozen_column_count},
-                   }},
-              }},
-             {"fields", "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"},
-         }},
+  auto build_freeze_panes_request_body(int sheet_id, int frozen_row_count, int frozen_column_count) -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = BatchUpdateRequestsPayload{};
+    payload.requests.push_back(BatchUpdateRequestsPayload::Request{
+        .updateSheetProperties =
+            UpdateSheetPropertiesPayload{
+                .properties =
+                    {
+                        .sheetId        = sheet_id,
+                        .gridProperties = {.frozenRowCount = frozen_row_count, .frozenColumnCount = frozen_column_count},
+                    },
+                .fields = "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+            },
     });
-    return json{{"requests", std::move(requests)}}.dump();
+
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build freeze panes request body")};
+    }
+    return json;
   }
 
   /**
    * @brief addOverGridImage 用 JSON 本文を生成します。
    * @param image 追加する画像情報です。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_add_over_grid_image_request_body(OverGridImage const& image) -> std::string {
+  auto build_add_over_grid_image_request_body(OverGridImage const& image) -> std::expected<std::string, GoogleSheetsError> {
     auto payload = AddOverGridImageRequest{
         .requests = {
             {
@@ -1132,22 +1282,26 @@ namespace detail {
         },
     };
     auto json = std::string{};
-    std::ignore = glz::write_json(payload, json);
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build add over grid image request body")};
+    }
     return json;
   }
 
   /**
    * @brief spreadsheets.create 用 JSON 本文を生成します。
    * @param title スプレッドシートのタイトルです。
-   * @return JSON 本文です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
    */
-  auto build_create_spreadsheet_request_body(std::string_view title) -> std::string {
-    auto json   = std::string{};
-    std::ignore = glz::write_json(glz::obj{
-                     "properties",
-                     glz::obj{"title", title},
-                 },
-                 json);
+  auto build_create_spreadsheet_request_body(std::string_view title) -> std::expected<std::string, GoogleSheetsError> {
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(glz::obj{
+                            "properties",
+                            glz::obj{"title", title},
+                        },
+                        json)) {
+      return std::unexpected{make_parse_error("failed to build create spreadsheet request body")};
+    }
     return json;
   }
 
@@ -1210,8 +1364,9 @@ namespace detail {
    * @return 更新後 URL です。
    */
   auto append_query_parameter(std::string url, std::string_view key, std::string_view value) -> std::string {
+    auto const has_query = url.find('?') != std::string::npos;
     url.reserve(url.size() + 1 + (key.size() * 3) + 1 + (value.size() * 3));
-    url += (url.find('?') == std::string::npos) ? '?' : '&';
+    url += has_query ? '&' : '?';
     percent_encode(key, url);
     url += '=';
     percent_encode(value, url);

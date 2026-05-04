@@ -76,6 +76,9 @@ struct UserOAuth2Auth {
   std::string                         client_secret{};                                      ///< OAuth2 クライアントシークレットです。
   std::string                         token_uri{"https://oauth2.googleapis.com/token"};     ///< トークンエンドポイントです。
   std::string                         redirect_uri{};                                       ///< authorization code 交換に必要な redirect URI です。
+  /// @note このフィールドはライブラリ内部では使用されません。
+  ///       認可コードの取得（ブラウザリダイレクト）はこのライブラリのスコープ外であり、
+  ///       スコープの指定は認可 URL 構築時にアプリケーション側で行う必要があります。
   std::vector<std::string>            scopes{};                                             ///< 認可時に要求したスコープ一覧です。
   std::string                         authorization_code{};                                 ///< 初回トークン交換に使う認可コードです。
   std::string                         refresh_token{};                                      ///< 再認可なしで再取得するための refresh token です。

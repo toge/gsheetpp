@@ -144,70 +144,70 @@ private:
   /**
    * @brief values.update 用の JSON 本文を組み立てます。
    * @param values 書き込むセル値一覧です。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_write_values_request_body(std::span<std::vector<std::string> const> values) -> std::string;
+  auto build_write_values_request_body(std::span<std::vector<std::string> const> values) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief addSheet 用の JSON 本文を組み立てます。
    * @param title 追加するシートのタイトルです。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_add_sheet_request_body(std::string_view title) -> std::string;
+  auto build_add_sheet_request_body(std::string_view title) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief renameSheet 用の JSON 本文を組み立てます。
    * @param sheet_id 変更対象のシート ID です。
    * @param new_title 新しいタイトルです。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_rename_sheet_request_body(int sheet_id, std::string_view new_title) -> std::string;
+  auto build_rename_sheet_request_body(int sheet_id, std::string_view new_title) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief deleteSheet 用の JSON 本文を組み立てます。
    * @param sheet_id 削除対象のシート ID です。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_delete_sheet_request_body(int sheet_id) -> std::string;
+  auto build_delete_sheet_request_body(int sheet_id) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief reorderSheet 用の JSON 本文を組み立てます。
    * @param sheet_id 変更対象のシート ID です。
    * @param new_index 新しいインデックスです。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_reorder_sheet_request_body(int sheet_id, int new_index) -> std::string;
+  auto build_reorder_sheet_request_body(int sheet_id, int new_index) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief repeatCell 用の JSON 本文を組み立ててセル書式を更新します。
    * @param range 対象のセル範囲です。
    * @param format 適用する書式設定です。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_update_cell_format_request_body(GridRange const& range, CellFormat const& format) -> std::string;
+  auto build_update_cell_format_request_body(GridRange const& range, CellFormat const& format) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief 行・列の固定設定用の JSON 本文を組み立てます。
    * @param sheet_id 対象のシート ID です。
    * @param frozen_row_count 固定する行数です。
    * @param frozen_column_count 固定する列数です。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_freeze_panes_request_body(int sheet_id, int frozen_row_count, int frozen_column_count) -> std::string;
+  auto build_freeze_panes_request_body(int sheet_id, int frozen_row_count, int frozen_column_count) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief addOverGridImage 用の JSON 本文を組み立てます。
    * @param image 追加する画像情報です。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_add_over_grid_image_request_body(OverGridImage const& image) -> std::string;
+  auto build_add_over_grid_image_request_body(OverGridImage const& image) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief spreadsheets.create 用の JSON 本文を組み立てます。
    * @param title スプレッドシートのタイトルです。
-   * @return JSON 文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
    */
-  auto build_create_spreadsheet_request_body(std::string_view title) -> std::string;
+  auto build_create_spreadsheet_request_body(std::string_view title) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
    * @brief spreadsheets.create 応答から spreadsheetId を抽出します。
@@ -227,7 +227,10 @@ private:
    * @brief values API エンドポイント URL を組み立てます。
    * @param spreadsheet_id 対象スプレッドシート ID です。
    * @param range A1 形式のレンジです。
-   * @param query 付加したいクエリ文字列です。
+   * @param query 付加するクエリ文字列です。
+   * @note query は呼び出し側で percent-encode 済みの完全なクエリ文字列（例: "valueInputOption=RAW"）を
+   *       渡すこと。この関数はエンコードを行いません。
+   *       キーと値を個別に渡したい場合は append_query_parameter を使用してください。
    * @return 組み立て済み URL です。
    */
   auto build_values_url(std::string_view spreadsheet_id, std::string_view range, std::string_view query = {}) -> std::string;
@@ -235,7 +238,10 @@ private:
   /**
    * @brief spreadsheet API エンドポイント URL を組み立てます。
    * @param spreadsheet_id 対象スプレッドシート ID です。
-   * @param query 付加したいクエリ文字列です。
+   * @param query 付加するクエリ文字列です。
+   * @note query は呼び出し側で percent-encode 済みの完全なクエリ文字列（例: "fields=sheets"）を
+   *       渡すこと。この関数はエンコードを行いません。
+   *       キーと値を個別に渡したい場合は append_query_parameter を使用してください。
    * @return 組み立て済み URL です。
    */
   auto build_spreadsheet_url(std::string_view spreadsheet_id, std::string_view query = {}) -> std::string;
@@ -453,11 +459,15 @@ auto BasicGoogleSheetsClient<Auth>::write_values_async(std::string_view spreadsh
   auto const write_range = std::string{range};
   auto const values      = std::vector<std::vector<std::string>>{data.begin(), data.end()};
   return std::async(std::launch::async, [client = *this, spreadsheet, write_range, values]() mutable -> std::expected<WriteValuesResult, GoogleSheetsError> {
+    auto body = detail::build_write_values_request_body(values);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "PUT",
         .url     = detail::build_values_url(spreadsheet, write_range, "valueInputOption=RAW"),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_write_values_request_body(values),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -513,11 +523,15 @@ auto BasicGoogleSheetsClient<Auth>::add_sheet_async(std::string_view spreadsheet
   auto const spreadsheet = std::string{spreadsheet_id};
   auto const sheet_title = std::string{title};
   return std::async(std::launch::async, [client = *this, spreadsheet, sheet_title]() mutable -> std::expected<SheetMetadata, GoogleSheetsError> {
+    auto body = detail::build_add_sheet_request_body(sheet_title);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_add_sheet_request_body(sheet_title),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -554,11 +568,15 @@ auto BasicGoogleSheetsClient<Auth>::rename_sheet_async(std::string_view spreadsh
   auto const spreadsheet = std::string{spreadsheet_id};
   auto const title       = std::string{new_title};
   return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id, title]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_rename_sheet_request_body(sheet_id, title);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_rename_sheet_request_body(sheet_id, title),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -593,11 +611,15 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::delete_sheet_async(std::string_view spreadsheet_id, int sheet_id) -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_delete_sheet_request_body(sheet_id);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_delete_sheet_request_body(sheet_id),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -633,11 +655,15 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::reorder_sheet_async(std::string_view spreadsheet_id, int sheet_id, int new_index) -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id, new_index]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_reorder_sheet_request_body(sheet_id, new_index);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_reorder_sheet_request_body(sheet_id, new_index),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -674,11 +700,15 @@ auto BasicGoogleSheetsClient<Auth>::update_cell_format_async(std::string_view sp
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   return std::async(std::launch::async, [client = *this, spreadsheet, range, format]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_update_cell_format_request_body(range, format);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_update_cell_format_request_body(range, format),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -716,11 +746,15 @@ auto BasicGoogleSheetsClient<Auth>::freeze_panes_async(std::string_view spreadsh
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id, frozen_row_count, frozen_column_count]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_freeze_panes_request_body(sheet_id, frozen_row_count, frozen_column_count);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_freeze_panes_request_body(sheet_id, frozen_row_count, frozen_column_count),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -756,11 +790,15 @@ auto BasicGoogleSheetsClient<Auth>::add_over_grid_image_async(std::string_view s
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   return std::async(std::launch::async, [client = *this, spreadsheet, image]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_add_over_grid_image_request_body(image);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = detail::build_batch_update_url(spreadsheet),
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_add_over_grid_image_request_body(image),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {
@@ -794,11 +832,15 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::create_new_spreadsheet_async(std::string_view title) -> std::future<std::expected<std::string, GoogleSheetsError>> {
   auto const spreadsheet_title = std::string{title};
   return std::async(std::launch::async, [client = *this, spreadsheet_title]() mutable -> std::expected<std::string, GoogleSheetsError> {
+    auto body = detail::build_create_spreadsheet_request_body(spreadsheet_title);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
     auto request = detail::HttpRequest{
         .method  = "POST",
         .url     = "https://sheets.googleapis.com/v4/spreadsheets",
         .headers = {"Content-Type: application/json"},
-        .body    = detail::build_create_spreadsheet_request_body(spreadsheet_title),
+        .body    = *std::move(body),
     };
     auto prepared = client.prepare_request(request, true);
     if (!prepared) {

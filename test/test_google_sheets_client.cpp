@@ -362,10 +362,11 @@ TEST_CASE("write values request body serializes values and major dimension", "[r
   };
 
   auto const body = gsheetpp::detail::build_write_values_request_body(values);
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"majorDimension\":\"ROWS\"") != std::string::npos);
-  CHECK(body.find("\"demo\"") != std::string::npos);
-  CHECK(body.find("\"456\"") != std::string::npos);
+  CHECK(body->find("\"majorDimension\":\"ROWS\"") != std::string::npos);
+  CHECK(body->find("\"demo\"") != std::string::npos);
+  CHECK(body->find("\"456\"") != std::string::npos);
 }
 
 TEST_CASE("write values request body accepts span without copying rows", "[requests]") {
@@ -375,10 +376,11 @@ TEST_CASE("write values request body accepts span without copying rows", "[reque
   };
 
   auto const body = gsheetpp::detail::build_write_values_request_body(std::span<std::vector<std::string> const>{values.data(), values.size()});
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"majorDimension\":\"ROWS\"") != std::string::npos);
-  CHECK(body.find("\"demo\"") != std::string::npos);
-  CHECK(body.find("\"456\"") != std::string::npos);
+  CHECK(body->find("\"majorDimension\":\"ROWS\"") != std::string::npos);
+  CHECK(body->find("\"demo\"") != std::string::npos);
+  CHECK(body->find("\"456\"") != std::string::npos);
 }
 
 /**

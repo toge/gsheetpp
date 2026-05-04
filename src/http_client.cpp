@@ -34,7 +34,10 @@ namespace {
    */
   auto ensure_curl_initialized() -> void {
     static auto once = std::once_flag{};
-    std::call_once(once, [] { std::ignore = curl_global_init(CURL_GLOBAL_DEFAULT); });
+    std::call_once(once, [] {
+      std::ignore = curl_global_init(CURL_GLOBAL_DEFAULT);
+      std::atexit([] { curl_global_cleanup(); });
+    });
   }
 
 }  // namespace
@@ -63,7 +66,12 @@ auto perform_http_request(detail::HttpRequest const& request) -> std::expected<d
     header_list = curl_slist_append(header_list, header.c_str());
   }
 
+  auto constexpr CONNECT_TIMEOUT_SECONDS = 10L;
+  auto constexpr TOTAL_TIMEOUT_SECONDS   = 30L;
+
   curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str());
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_SECONDS);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, TOTAL_TIMEOUT_SECONDS);
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);

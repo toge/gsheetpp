@@ -47,30 +47,34 @@ auto make_test_private_key() -> std::string {
 
 TEST_CASE("addSheet request body is serialized", "[requests]") {
   auto const body = gsheetpp::detail::build_add_sheet_request_body("NewSheet");
-  CHECK(body.find("\"addSheet\"") != std::string::npos);
-  CHECK(body.find("\"title\":\"NewSheet\"") != std::string::npos);
+  REQUIRE(body.has_value());
+  CHECK(body->find("\"addSheet\"") != std::string::npos);
+  CHECK(body->find("\"title\":\"NewSheet\"") != std::string::npos);
 }
 
 TEST_CASE("renameSheet request body is serialized", "[requests]") {
   auto const body = gsheetpp::detail::build_rename_sheet_request_body(123, "RenamedSheet");
-  CHECK(body.find("\"updateSheetProperties\"") != std::string::npos);
-  CHECK(body.find("\"sheetId\":123") != std::string::npos);
-  CHECK(body.find("\"title\":\"RenamedSheet\"") != std::string::npos);
-  CHECK(body.find("\"fields\":\"title\"") != std::string::npos);
+  REQUIRE(body.has_value());
+  CHECK(body->find("\"updateSheetProperties\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":123") != std::string::npos);
+  CHECK(body->find("\"title\":\"RenamedSheet\"") != std::string::npos);
+  CHECK(body->find("\"fields\":\"title\"") != std::string::npos);
 }
 
 TEST_CASE("deleteSheet request body is serialized", "[requests]") {
   auto const body = gsheetpp::detail::build_delete_sheet_request_body(456);
-  CHECK(body.find("\"deleteSheet\"") != std::string::npos);
-  CHECK(body.find("\"sheetId\":456") != std::string::npos);
+  REQUIRE(body.has_value());
+  CHECK(body->find("\"deleteSheet\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":456") != std::string::npos);
 }
 
 TEST_CASE("reorderSheet request body is serialized", "[requests]") {
   auto const body = gsheetpp::detail::build_reorder_sheet_request_body(789, 2);
-  CHECK(body.find("\"updateSheetProperties\"") != std::string::npos);
-  CHECK(body.find("\"sheetId\":789") != std::string::npos);
-  CHECK(body.find("\"index\":2") != std::string::npos);
-  CHECK(body.find("\"fields\":\"index\"") != std::string::npos);
+  REQUIRE(body.has_value());
+  CHECK(body->find("\"updateSheetProperties\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":789") != std::string::npos);
+  CHECK(body->find("\"index\":2") != std::string::npos);
+  CHECK(body->find("\"fields\":\"index\"") != std::string::npos);
 }
 
 TEST_CASE("parse_add_sheet_response extracts metadata", "[responses]") {
@@ -237,14 +241,15 @@ TEST_CASE("update_cell_format_async request body serialization", "[requests]") {
   };
 
   auto const body = gsheetpp::detail::build_update_cell_format_request_body(range, format);
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"sheetId\":0") != std::string::npos);
-  CHECK(body.find("\"startRowIndex\":1") != std::string::npos);
-  CHECK(body.find("\"endRowIndex\":5") != std::string::npos);
-  CHECK(body.find("\"backgroundColor\"") != std::string::npos);
-  CHECK(body.find("\"foregroundColor\"") != std::string::npos);
-  CHECK(body.find("\"bold\":true") != std::string::npos);
-  CHECK(body.find("\"fields\":\"userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.bold\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":0") != std::string::npos);
+  CHECK(body->find("\"startRowIndex\":1") != std::string::npos);
+  CHECK(body->find("\"endRowIndex\":5") != std::string::npos);
+  CHECK(body->find("\"backgroundColor\"") != std::string::npos);
+  CHECK(body->find("\"foregroundColor\"") != std::string::npos);
+  CHECK(body->find("\"bold\":true") != std::string::npos);
+  CHECK(body->find("\"fields\":\"userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.bold\"") != std::string::npos);
 }
 
 TEST_CASE("update_cell_format_async partial update serialization", "[requests]") {
@@ -256,12 +261,13 @@ TEST_CASE("update_cell_format_async partial update serialization", "[requests]")
   };
 
   auto const body = gsheetpp::detail::build_update_cell_format_request_body(range, format);
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"sheetId\":123") != std::string::npos);
-  CHECK(body.find("\"startRowIndex\"") == std::string::npos);
-  CHECK(body.find("\"backgroundColor\"") == std::string::npos);
-  CHECK(body.find("\"bold\":false") != std::string::npos);
-  CHECK(body.find("\"fields\":\"userEnteredFormat.textFormat.bold\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":123") != std::string::npos);
+  CHECK(body->find("\"startRowIndex\"") == std::string::npos);
+  CHECK(body->find("\"backgroundColor\"") == std::string::npos);
+  CHECK(body->find("\"bold\":false") != std::string::npos);
+  CHECK(body->find("\"fields\":\"userEnteredFormat.textFormat.bold\"") != std::string::npos);
 }
 
 TEST_CASE("update_cell_format_async successful execution", "[client]") {
@@ -297,11 +303,12 @@ TEST_CASE("update_cell_format_async successful execution", "[client]") {
 
 TEST_CASE("freeze_panes_async request body serialization", "[requests]") {
   auto const body = gsheetpp::detail::build_freeze_panes_request_body(123, 2, 1);
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"sheetId\":123") != std::string::npos);
-  CHECK(body.find("\"frozenRowCount\":2") != std::string::npos);
-  CHECK(body.find("\"frozenColumnCount\":1") != std::string::npos);
-  CHECK(body.find("\"fields\":\"gridProperties.frozenRowCount,gridProperties.frozenColumnCount\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":123") != std::string::npos);
+  CHECK(body->find("\"frozenRowCount\":2") != std::string::npos);
+  CHECK(body->find("\"frozenColumnCount\":1") != std::string::npos);
+  CHECK(body->find("\"fields\":\"gridProperties.frozenRowCount,gridProperties.frozenColumnCount\"") != std::string::npos);
 }
 
 TEST_CASE("freeze_panes_async successful execution", "[client]") {
@@ -349,13 +356,14 @@ TEST_CASE("add_over_grid_image_async request body serialization", "[requests]") 
   };
 
   auto const body = gsheetpp::detail::build_add_over_grid_image_request_body(image);
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"sourceUri\":\"https://example.com/image.png\"") != std::string::npos);
-  CHECK(body.find("\"sheetId\":0") != std::string::npos);
-  CHECK(body.find("\"rowIndex\":5") != std::string::npos);
-  CHECK(body.find("\"columnIndex\":2") != std::string::npos);
-  CHECK(body.find("\"offsetXPixels\":10") != std::string::npos);
-  CHECK(body.find("\"widthPixels\":300") != std::string::npos);
+  CHECK(body->find("\"sourceUri\":\"https://example.com/image.png\"") != std::string::npos);
+  CHECK(body->find("\"sheetId\":0") != std::string::npos);
+  CHECK(body->find("\"rowIndex\":5") != std::string::npos);
+  CHECK(body->find("\"columnIndex\":2") != std::string::npos);
+  CHECK(body->find("\"offsetXPixels\":10") != std::string::npos);
+  CHECK(body->find("\"widthPixels\":300") != std::string::npos);
 }
 
 TEST_CASE("add_over_grid_image_async successful execution", "[client]") {
@@ -390,9 +398,10 @@ TEST_CASE("add_over_grid_image_async successful execution", "[client]") {
 
 TEST_CASE("create_new_spreadsheet_async request body serialization", "[requests]") {
   auto const body = gsheetpp::detail::build_create_spreadsheet_request_body("NewSpreadsheet");
+  REQUIRE(body.has_value());
 
-  CHECK(body.find("\"properties\"") != std::string::npos);
-  CHECK(body.find("\"title\":\"NewSpreadsheet\"") != std::string::npos);
+  CHECK(body->find("\"properties\"") != std::string::npos);
+  CHECK(body->find("\"title\":\"NewSpreadsheet\"") != std::string::npos);
 }
 
 TEST_CASE("create_new_spreadsheet_async successful execution", "[client]") {

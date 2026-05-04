@@ -41,5 +41,5 @@ NamespaceIndentation: Inner
 
 ReflowComments: true
 
-Standard: Cpp11
+Standard: Latest
 SpacesBeforeTrailingComments: 2
