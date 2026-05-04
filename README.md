@@ -11,7 +11,36 @@ gsheetpp は、Google Sheets API v4 を扱うモダンな C++ 用クライアン
 - **JWT サービスアカウント認証**: `jwt-cpp` と OpenSSL による RS256 署名
 - **OAuth2 自動更新**: User OAuth2 は 401 応答時に 1 回だけ自動 refresh & retry
 
-## 依存ライブラリ
+## スプレッドシートの新規作成
+
+`create_new_spreadsheet_async` を使用して、指定したタイトルで新しいスプレッドシートを作成できます。
+
+```cpp
+auto result = client.create_new_spreadsheet_async("New Project Sheet").get();
+if (result) {
+  std::string new_id = *result;
+  std::cout << "Created new spreadsheet ID: " << new_id << "\n";
+
+  // 作成した ID を使用してデータを書き込む
+  client.write_values_async(new_id, "Sheet1!A1", {{"Hello", "World"}}).get();
+}
+```
+
+## スプレッドシートの一覧取得
+
+`fetch_root_spreadsheets_async` を使用して、マイドライブのルートディレクトリにあるスプレッドシートを一覧取得できます。
+
+```cpp
+auto result = client.fetch_root_spreadsheets_async().get();
+if (result) {
+  for (auto const& file : *result) {
+    std::cout << "Name: " << file.name << ", ID: " << file.id << "\n";
+  }
+}
+```
+
+## シート管理
+
 
 - `curl`
 - `glaze`
@@ -34,6 +63,93 @@ cd build && ctest -V
 | `ApiKeyAuth` | 公開スプレッドシートの read-only | `key=` クエリを付与。write は即エラー |
 | `ServiceAccountAuth` | サーバー間通信 | JWT bearer token を取得して `Authorization` ヘッダーを付与 |
 | `UserOAuth2Auth` | ユーザー委譲アクセス | アクセストークンを保持し、401 で 1 回だけ refresh & retry |
+
+## シート管理
+
+ライブラリは以下のシート管理操作を非同期でサポートしています：
+
+- **add_sheet_async**: 新しいシート（タブ）を追加
+- **rename_sheet_async**: 既存シートの名前を変更
+- **delete_sheet_async**: シートを削除
+- **reorder_sheet_async**: シートの表示順序（インデックス）を変更
+
+## セル書式の更新
+
+`update_cell_format_async` を使用して、指定した範囲のセルの背景色、文字色、太字設定を一括で更新できます。
+
+```cpp
+auto const range = gsheetpp::GridRange{
+  .sheet_id = 0,
+  .start_row = 0,
+  .end_row = 5,
+  .start_column = 0,
+  .end_column = 2
+};
+
+auto const format = gsheetpp::CellFormat{
+  .background_color = gsheetpp::Color{1.0f, 0.8f, 0.8f}, // RGB (0.0 - 1.0)
+  .foreground_color = gsheetpp::Color{0.0f, 0.0f, 0.0f},
+  .bold = true
+};
+
+client.update_cell_format_async("spreadsheet-id", range, format).get();
+```
+
+`CellFormat` の各フィールドは `std::optional` なので、更新したい項目だけを指定でき、他の書式を破壊しません。
+
+## 行・列の固定
+
+`freeze_panes_async` を使用して、指定したシートの行や列を固定できます。
+
+```cpp
+// 1行目と1列目を固定
+client.freeze_panes_async("spreadsheet-id", sheet_id, 1, 1).get();
+
+// 行の固定を解除（0を指定）
+client.freeze_panes_async("spreadsheet-id", sheet_id, 0, 0).get();
+```
+
+## 画像の挿入
+
+`add_over_grid_image_async` を使用して、指定したURLの画像をシート上の指定位置にオーバーレイとして追加できます。
+
+```cpp
+auto const image = gsheetpp::OverGridImage{
+  .source_uri = "https://example.com/logo.png",
+  .position = {
+    .sheet_id = 0,
+    .row_index = 1,       // 2行目
+    .column_index = 1,    // B列
+    .offset_x_pixels = 5,
+    .offset_y_pixels = 5,
+    .width_pixels = 200,
+    .height_pixels = 100
+  }
+};
+
+client.add_over_grid_image_async("spreadsheet-id", image).get();
+```
+
+## 使用範囲の取得
+
+`get_used_range_async` を使用して、シート内のデータが存在する全範囲（A1から最終データまで）を取得できます。また、ユーティリティ関数を使用して最終行・最終列を特定できます。
+
+```cpp
+auto result = client.get_used_range_async("spreadsheet-id", "Sheet1").get();
+if (result) {
+  auto const last_row = gsheetpp::get_last_row(result->values);
+  auto const last_col = gsheetpp::get_last_column(result->values);
+  std::cout << "Last Row: " << last_row << ", Last Col: " << last_col << "\n";
+}
+```
+
+```cpp
+auto add_result = client.add_sheet_async("spreadsheet-id", "New Tab").get();
+if (add_result) {
+  auto const new_sheet_id = add_result->sheet_id;
+  client.rename_sheet_async("spreadsheet-id", new_sheet_id, "Renamed Tab").get();
+}
+```
 
 ### API Key
 

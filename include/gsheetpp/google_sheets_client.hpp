@@ -130,6 +130,64 @@ struct SheetMetadata {
 };
 
 /**
+ * @brief セルの色（0.0 - 1.0）を表します。
+ */
+struct Color {
+  float red{0.0f};
+  float green{0.0f};
+  float blue{0.0f};
+};
+
+/**
+ * @brief セルの書式設定を表します。
+ */
+struct CellFormat {
+  std::optional<Color> background_color{};  ///< 背景色です。
+  std::optional<Color> foreground_color{};  ///< 文字色です。
+  std::optional<bool>  bold{};              ///< 太字にするかどうかです。
+};
+
+/**
+ * @brief 処理対象のセル範囲をインデックスで指定します。
+ */
+struct GridRange {
+  int                sheet_id{};      ///< シート ID です。
+  std::optional<int> start_row{};     ///< 開始行（0開始、 inclusive）です。
+  std::optional<int> end_row{};       ///< 終了行（0開始、 exclusive）です。
+  std::optional<int> start_column{};  ///< 開始列（0開始、 inclusive）です。
+  std::optional<int> end_column{};    ///< 終了列（0開始、 exclusive）です。
+};
+
+/**
+ * @brief 画像やチャートの配置位置（オーバーレイ）を指定します。
+ */
+struct OverlayPosition {
+  int sheet_id{};           ///< シート ID です。
+  int row_index{};          ///< アンカーセルの行インデックス（0開始）です。
+  int column_index{};       ///< アンカーセルの列インデックス（0開始）です。
+  int offset_x_pixels{0};   ///< 横方向のオフセット（ピクセル）です。
+  int offset_y_pixels{0};   ///< 縦方向のオフセット（ピクセル）です。
+  int width_pixels{600};    ///< 画像の幅（ピクセル）です。
+  int height_pixels{400};   ///< 画像の高さ（ピクセル）です。
+};
+
+/**
+ * @brief オーバーレイ画像の情報を保持します。
+ */
+struct OverGridImage {
+  std::string     source_uri{};  ///< 画像の URL です。
+  OverlayPosition position{};    ///< 挿入位置とサイズ設定です。
+};
+
+/**
+ * @brief Google Drive 上のファイル情報を保持します。
+ */
+struct DriveFile {
+  std::string name{};  ///< ファイル名です。
+  std::string id{};    ///< ファイル ID です。
+};
+
+/**
  * @brief values.get 応答を保持します。
  */
 struct ReadValuesResult {
@@ -262,7 +320,91 @@ class BasicGoogleSheetsClient {
   auto write_values_async(std::string_view spreadsheet_id, std::string_view range, std::span<std::vector<std::string> const> data) -> std::future<std::expected<WriteValuesResult, GoogleSheetsError>>;
 
   /**
+   * @brief 新しいシート（タブ）を非同期で追加します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param title 追加するシートのタイトルです。
+   * @return 成功時は追加されたシートの SheetMetadata、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto add_sheet_async(std::string_view spreadsheet_id, std::string_view title) -> std::future<std::expected<SheetMetadata, GoogleSheetsError>>;
+
+  /**
+   * @brief シートの名前を非同期で変更します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param sheet_id 変更対象のシート ID です。
+   * @param new_title 新しいタイトルです。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto rename_sheet_async(std::string_view spreadsheet_id, int sheet_id, std::string_view new_title) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief シートを非同期で削除します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param sheet_id 削除対象のシート ID です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto delete_sheet_async(std::string_view spreadsheet_id, int sheet_id) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief シートの表示順序を非同期で変更します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param sheet_id 変更対象のシート ID です。
+   * @param new_index 新しいインデックス（0開始）です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto reorder_sheet_async(std::string_view spreadsheet_id, int sheet_id, int new_index) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定範囲のセル書式を非同期で一括更新します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range 対象のセル範囲（インデックス指定）です。
+   * @param format 適用する書式設定です。背景色、文字色、太字を指定可能です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto update_cell_format_async(std::string_view spreadsheet_id, GridRange const& range, CellFormat const& format) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定したシートの行・列の固定設定を非同期で更新します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param sheet_id 固定設定を適用するシート ID です。
+   * @param frozen_row_count 固定する行数です。
+   * @param frozen_column_count 固定する列数です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto freeze_panes_async(std::string_view spreadsheet_id, int sheet_id, int frozen_row_count, int frozen_column_count) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief シート内の全データを非同期で取得します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param sheet_name 対象のシート名です。
+   * @return 成功時は ReadValuesResult、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto get_used_range_async(std::string_view spreadsheet_id, std::string_view sheet_name) -> std::future<std::expected<ReadValuesResult, GoogleSheetsError>>;
+
+  /**
+   * @brief 画像をシート上の指定位置にオーバーレイとして非同期で追加します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param image 追加する画像の URL と配置情報です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto add_over_grid_image_async(std::string_view spreadsheet_id, OverGridImage const& image) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 新しいスプレッドシートを非同期で作成します。
+   * @param title 作成するスプレッドシートのタイトルです。
+   * @return 成功時は作成されたスプレッドシートの ID、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto create_new_spreadsheet_async(std::string_view title) -> std::future<std::expected<std::string, GoogleSheetsError>>;
+
+  /**
+   * @brief マイドライブのルート直下にあるスプレッドシートを一覧取得します。
+   * @return 成功時は DriveFile のリスト、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto fetch_root_spreadsheets_async() -> std::future<std::expected<std::vector<DriveFile>, GoogleSheetsError>>;
+
+  /**
    * @brief 現在の認証設定を可変参照で返します。
+
+
    * @return 内部保持している認証設定です。
    */
   auto authenticator() -> Auth& { return *auth_; }
@@ -303,6 +445,20 @@ BasicGoogleSheetsClient(Auth) -> BasicGoogleSheetsClient<Auth>;
 
 template <class Auth, class Transport>
 BasicGoogleSheetsClient(Auth, Transport&&, detail::ClockFunction = {}) -> BasicGoogleSheetsClient<Auth>;
+
+/**
+ * @brief 取得データから最終行（1開始）を特定します。
+ * @param values 取得したセルデータです。
+ * @return データの最終行番号です。データが空の場合は 0 です。
+ */
+auto get_last_row(std::vector<std::vector<std::string>> const& values) -> int;
+
+/**
+ * @brief 取得データから最終列（1開始）を特定します。
+ * @param values 取得したセルデータです。
+ * @return データの最終列番号です。データが空の場合は 0 です。
+ */
+auto get_last_column(std::vector<std::vector<std::string>> const& values) -> int;
 
 /**
  * @brief サービスアカウント JSON を構造化設定へ変換します。
