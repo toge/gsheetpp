@@ -1111,3 +1111,62 @@ TEST_CASE("service account returns the first 401 response without retry", "[clie
   CHECK(result.error().kind == gsheetpp::GoogleSheetsErrorKind::api_response);
   CHECK(result.error().message == "no retry");
 }
+
+TEST_CASE("merge_cells_async builds correct batchUpdate request", "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key  = make_test_private_key(),
+      .token_uri    = "https://oauth2.googleapis.com/token",
+  };
+
+  auto client =
+      gsheetpp::detail::make_google_sheets_client_for_test(config, [](gsheetpp::detail::HttpRequest const& request) -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body        = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        CHECK(request.method == "POST");
+        CHECK(request.url.find(":batchUpdate") != std::string::npos);
+        CHECK(request.body.find("\"mergeCells\"") != std::string::npos);
+        CHECK(request.body.find("\"mergeType\":\"MERGE_ROWS\"") != std::string::npos);
+        CHECK(request.body.find("\"sheetId\":123") != std::string::npos);
+        return gsheetpp::detail::HttpResponse{.status_code = 200, .body = "{}"};
+      });
+
+  auto const range = gsheetpp::GridRange{.sheet_id = 123, .start_row = 0, .end_row = 2};
+  auto       result = client.merge_cells_async("spreadsheet-id", range, gsheetpp::MergeType::merge_rows).get();
+
+  REQUIRE(result.has_value());
+}
+
+TEST_CASE("unmerge_cells_async builds correct batchUpdate request", "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key  = make_test_private_key(),
+      .token_uri    = "https://oauth2.googleapis.com/token",
+  };
+
+  auto client =
+      gsheetpp::detail::make_google_sheets_client_for_test(config, [](gsheetpp::detail::HttpRequest const& request) -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body        = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        CHECK(request.method == "POST");
+        CHECK(request.url.find(":batchUpdate") != std::string::npos);
+        CHECK(request.body.find("\"unmergeCells\"") != std::string::npos);
+        CHECK(request.body.find("\"sheetId\":456") != std::string::npos);
+        return gsheetpp::detail::HttpResponse{.status_code = 200, .body = "{}"};
+      });
+
+  auto const range = gsheetpp::GridRange{.sheet_id = 456, .start_row = 1, .end_row = 5};
+  auto       result = client.unmerge_cells_async("spreadsheet-id", range).get();
+
+  REQUIRE(result.has_value());
+}

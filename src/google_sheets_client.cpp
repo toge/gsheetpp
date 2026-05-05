@@ -143,6 +143,15 @@ struct RepeatCellPayload {
   std::string      fields{};
 };
 
+struct MergeCellsPayload {
+  GridRangePayload range{};
+  std::string      mergeType{};
+};
+
+struct UnmergeCellsPayload {
+  GridRangePayload range{};
+};
+
 /**
  * @brief シートプロパティ更新用の内部構造体です。
  */
@@ -164,6 +173,8 @@ struct BatchUpdateRequestsPayload {
   struct Request {
     std::optional<RepeatCellPayload>            repeatCell{};
     std::optional<UpdateSheetPropertiesPayload> updateSheetProperties{};
+    std::optional<MergeCellsPayload>            mergeCells{};
+    std::optional<UnmergeCellsPayload>          unmergeCells{};
   };
   std::vector<Request> requests{};
 };
@@ -421,7 +432,9 @@ struct meta<gsheetpp::BatchUpdateRequestsPayload::Request> {
   using T = gsheetpp::BatchUpdateRequestsPayload::Request;
   static constexpr auto value = object(
       "repeatCell", &T::repeatCell,
-      "updateSheetProperties", &T::updateSheetProperties);
+      "updateSheetProperties", &T::updateSheetProperties,
+      "mergeCells", &T::mergeCells,
+      "unmergeCells", &T::unmergeCells);
 };
 
 template <>
@@ -498,6 +511,18 @@ namespace {
         return "BOTTOM";
     }
     return "TOP";
+  }
+
+  auto to_api_merge_type(MergeType value) -> std::string_view {
+    switch (value) {
+      case MergeType::merge_all:
+        return "MERGE_ALL";
+      case MergeType::merge_rows:
+        return "MERGE_ROWS";
+      case MergeType::merge_columns:
+        return "MERGE_COLUMNS";
+    }
+    return "MERGE_ALL";
   }
 
   auto normalize_horizontal_alignment(std::string_view value) -> std::expected<std::string, GoogleSheetsError> {
@@ -1407,6 +1432,60 @@ namespace detail {
       return std::unexpected{normalized_vertical.error()};
     }
     return build_set_cell_alignment_request_body_impl(range, *normalized_horizontal, *normalized_vertical);
+  }
+
+  /**
+   * @brief mergeCells 用 JSON 本文を生成します。
+   * @param range 結合対象のセル範囲です。
+   * @param type 結合方式です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
+   */
+  auto build_merge_cells_request_body(GridRange const& range, MergeType type) -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = BatchUpdateRequestsPayload{};
+    payload.requests.push_back(BatchUpdateRequestsPayload::Request{
+        .mergeCells = MergeCellsPayload{
+            .range = {
+                .sheetId          = range.sheet_id,
+                .startRowIndex    = range.start_row,
+                .endRowIndex      = range.end_row,
+                .startColumnIndex = range.start_column,
+                .endColumnIndex   = range.end_column,
+            },
+            .mergeType = std::string{to_api_merge_type(type)},
+        },
+    });
+
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build merge cells request body")};
+    }
+    return json;
+  }
+
+  /**
+   * @brief unmergeCells 用 JSON 本文を生成します。
+   * @param range 結合解除対象のセル範囲です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
+   */
+  auto build_unmerge_cells_request_body(GridRange const& range) -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = BatchUpdateRequestsPayload{};
+    payload.requests.push_back(BatchUpdateRequestsPayload::Request{
+        .unmergeCells = UnmergeCellsPayload{
+            .range = {
+                .sheetId          = range.sheet_id,
+                .startRowIndex    = range.start_row,
+                .endRowIndex      = range.end_row,
+                .startColumnIndex = range.start_column,
+                .endColumnIndex   = range.end_column,
+            },
+        },
+    });
+
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build unmerge cells request body")};
+    }
+    return json;
   }
 
   /**

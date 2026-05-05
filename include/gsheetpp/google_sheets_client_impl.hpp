@@ -230,6 +230,21 @@ private:
   auto build_add_over_grid_image_request_body(OverGridImage const& image) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
+   * @brief mergeCells 用の JSON 本文を組み立てます。
+   * @param range 結合対象のセル範囲です。
+   * @param type 結合方式です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
+   */
+  auto build_merge_cells_request_body(GridRange const& range, MergeType type) -> std::expected<std::string, GoogleSheetsError>;
+
+  /**
+   * @brief unmergeCells 用の JSON 本文を組み立てます。
+   * @param range 結合解除対象のセル範囲です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
+   */
+  auto build_unmerge_cells_request_body(GridRange const& range) -> std::expected<std::string, GoogleSheetsError>;
+
+  /**
    * @brief spreadsheets.create 用の JSON 本文を組み立てます。
    * @param title スプレッドシートのタイトルです。
    * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
@@ -964,6 +979,95 @@ auto BasicGoogleSheetsClient<Auth>::add_over_grid_image_async(std::string_view s
   auto const spreadsheet = std::string{spreadsheet_id};
   return std::async(std::launch::async, [client = *this, spreadsheet, image]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_add_over_grid_image_request_body(image);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
+    auto request = detail::HttpRequest{
+        .method  = "POST",
+        .url     = detail::build_batch_update_url(spreadsheet),
+        .headers = {"Content-Type: application/json"},
+        .body    = *std::move(body),
+    };
+    auto prepared = client.prepare_request(request, true);
+    if (!prepared) {
+      return std::unexpected{prepared.error()};
+    }
+
+    auto response = client.execute_request(std::move(request), true);
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto api_error = detail::parse_api_error_response(response->body);
+      return std::unexpected{GoogleSheetsError{
+          .kind          = GoogleSheetsErrorKind::api_response,
+          .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
+          .http_status   = response->status_code,
+          .response_body = response->body,
+      }};
+    }
+
+    return {};
+  });
+}
+
+template <Authenticator Auth>
+/**
+ * @brief spreadsheets.batchUpdate を非同期実行してセルを結合します。
+ * @param spreadsheet_id 対象スプレッドシート ID です。
+ * @param range 結合対象のセル範囲です。
+ * @param type 結合方式です。
+ * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+ */
+auto BasicGoogleSheetsClient<Auth>::merge_cells_async(std::string_view spreadsheet_id, GridRange const& range, MergeType type)
+    -> std::future<std::expected<void, GoogleSheetsError>> {
+  auto const spreadsheet = std::string{spreadsheet_id};
+  return std::async(std::launch::async, [client = *this, spreadsheet, range, type]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_merge_cells_request_body(range, type);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
+    auto request = detail::HttpRequest{
+        .method  = "POST",
+        .url     = detail::build_batch_update_url(spreadsheet),
+        .headers = {"Content-Type: application/json"},
+        .body    = *std::move(body),
+    };
+    auto prepared = client.prepare_request(request, true);
+    if (!prepared) {
+      return std::unexpected{prepared.error()};
+    }
+
+    auto response = client.execute_request(std::move(request), true);
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto api_error = detail::parse_api_error_response(response->body);
+      return std::unexpected{GoogleSheetsError{
+          .kind          = GoogleSheetsErrorKind::api_response,
+          .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
+          .http_status   = response->status_code,
+          .response_body = response->body,
+      }};
+    }
+
+    return {};
+  });
+}
+
+template <Authenticator Auth>
+/**
+ * @brief spreadsheets.batchUpdate を非同期実行してセルの結合を解除します。
+ * @param spreadsheet_id 対象スプレッドシート ID です。
+ * @param range 結合解除対象のセル範囲です。
+ * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+ */
+auto BasicGoogleSheetsClient<Auth>::unmerge_cells_async(std::string_view spreadsheet_id, GridRange const& range)
+    -> std::future<std::expected<void, GoogleSheetsError>> {
+  auto const spreadsheet = std::string{spreadsheet_id};
+  return std::async(std::launch::async, [client = *this, spreadsheet, range]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_unmerge_cells_request_body(range);
     if (!body) {
       return std::unexpected{body.error()};
     }

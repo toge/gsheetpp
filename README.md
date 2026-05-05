@@ -161,6 +161,32 @@ client.freeze_panes_async("spreadsheet-id", sheet_id, 1, 1).get();
 client.freeze_panes_async("spreadsheet-id", sheet_id, 0, 0).get();
 ```
 
+## セルの結合と解除
+
+`merge_cells_async` を使用して指定範囲のセルを結合し、`unmerge_cells_async` で結合を解除できます。
+
+```cpp
+auto const range = gsheetpp::GridRange{
+  .sheet_id = 0,
+  .start_row = 0,
+  .end_row = 2,
+  .start_column = 0,
+  .end_column = 2
+};
+
+// 全結合 (MERGE_ALL)
+client.merge_cells_async("spreadsheet-id", range, gsheetpp::MergeType::merge_all).get();
+
+// 行ごとに結合 (MERGE_ROWS)
+client.merge_cells_async("spreadsheet-id", range, gsheetpp::MergeType::merge_rows).get();
+
+// 列ごとに結合 (MERGE_COLUMNS)
+client.merge_cells_async("spreadsheet-id", range, gsheetpp::MergeType::merge_columns).get();
+
+// 結合の解除
+client.unmerge_cells_async("spreadsheet-id", range).get();
+```
+
 ## 画像の挿入
 
 `add_over_grid_image_async` を使用して、指定したURLの画像をシート上の指定位置にオーバーレイとして追加できます。

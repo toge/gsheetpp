@@ -160,6 +160,15 @@ enum class VerticalAlign {
 };
 
 /**
+ * @brief セルの結合方式です。
+ */
+enum class MergeType {
+  merge_all,      ///< 範囲内の全セルを1つに結合します (MERGE_ALL)。
+  merge_rows,     ///< 各行ごとにセルを結合します (MERGE_ROWS)。
+  merge_columns,  ///< 各列ごとにセルを結合します (MERGE_COLUMNS)。
+};
+
+/**
  * @brief セルの書式設定を表します。
  */
 struct CellFormat {
@@ -463,6 +472,23 @@ class BasicGoogleSheetsClient {
    * @return 成功時は DriveFile のリスト、失敗時は GoogleSheetsError を返す future です。
    */
   auto fetch_root_spreadsheets_async() -> std::future<std::expected<std::vector<DriveFile>, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定範囲のセルを非同期で結合します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range 結合対象のセル範囲です。
+   * @param type 結合方式（全結合、行ごと、列ごと）です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto merge_cells_async(std::string_view spreadsheet_id, GridRange const& range, MergeType type) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定範囲のセルの結合を非同期で解除します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range 結合解除対象のセル範囲です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto unmerge_cells_async(std::string_view spreadsheet_id, GridRange const& range) -> std::future<std::expected<void, GoogleSheetsError>>;
 
   /**
    * @brief 現在の認証設定を可変参照で返します。
