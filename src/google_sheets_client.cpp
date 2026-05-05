@@ -111,12 +111,18 @@ struct ColorPayload {
 
 struct TextFormatPayload {
   std::optional<ColorPayload> foregroundColor{};
+  std::optional<std::string>  fontFamily{};
+  std::optional<int>          fontSize{};
   std::optional<bool>         bold{};
+  std::optional<bool>         italic{};
+  std::optional<bool>         strikethrough{};
 };
 
 struct UserEnteredFormatPayload {
   std::optional<ColorPayload>      backgroundColor{};
+  std::optional<std::string>       horizontalAlignment{};
   std::optional<TextFormatPayload> textFormat{};
+  std::optional<std::string>       verticalAlignment{};
 };
 
 struct CellPayload {
@@ -343,7 +349,11 @@ struct meta<gsheetpp::TextFormatPayload> {
   using T = gsheetpp::TextFormatPayload;
   static constexpr auto value = object(
       "foregroundColor", &T::foregroundColor,
-      "bold", &T::bold);
+      "fontFamily", &T::fontFamily,
+      "fontSize", &T::fontSize,
+      "bold", &T::bold,
+      "italic", &T::italic,
+      "strikethrough", &T::strikethrough);
 };
 
 template <>
@@ -351,7 +361,9 @@ struct meta<gsheetpp::UserEnteredFormatPayload> {
   using T = gsheetpp::UserEnteredFormatPayload;
   static constexpr auto value = object(
       "backgroundColor", &T::backgroundColor,
-      "textFormat", &T::textFormat);
+      "horizontalAlignment", &T::horizontalAlignment,
+      "textFormat", &T::textFormat,
+      "verticalAlignment", &T::verticalAlignment);
 };
 
 template <>
@@ -453,6 +465,83 @@ namespace {
         .kind    = GoogleSheetsErrorKind::configuration,
         .message = std::string{message},
     };
+  }
+
+  auto to_upper_ascii(std::string_view value) -> std::string {
+    auto normalized = std::string{};
+    normalized.reserve(value.size());
+    for (auto const ch : value) {
+      normalized.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+    return normalized;
+  }
+
+  auto to_api_alignment(HorizontalAlign value) -> std::string_view {
+    switch (value) {
+      case HorizontalAlign::left:
+        return "LEFT";
+      case HorizontalAlign::center:
+        return "CENTER";
+      case HorizontalAlign::right:
+        return "RIGHT";
+    }
+    return "LEFT";
+  }
+
+  auto to_api_alignment(VerticalAlign value) -> std::string_view {
+    switch (value) {
+      case VerticalAlign::top:
+        return "TOP";
+      case VerticalAlign::middle:
+        return "MIDDLE";
+      case VerticalAlign::bottom:
+        return "BOTTOM";
+    }
+    return "TOP";
+  }
+
+  auto normalize_horizontal_alignment(std::string_view value) -> std::expected<std::string, GoogleSheetsError> {
+    auto normalized = to_upper_ascii(value);
+    if (normalized == "LEFT" || normalized == "CENTER" || normalized == "RIGHT") {
+      return normalized;
+    }
+    return std::unexpected{make_configuration_error(std::format("invalid horizontal alignment: {}", value))};
+  }
+
+  auto normalize_vertical_alignment(std::string_view value) -> std::expected<std::string, GoogleSheetsError> {
+    auto normalized = to_upper_ascii(value);
+    if (normalized == "TOP" || normalized == "MIDDLE" || normalized == "BOTTOM") {
+      return normalized;
+    }
+    return std::unexpected{make_configuration_error(std::format("invalid vertical alignment: {}", value))};
+  }
+
+  auto build_set_cell_alignment_request_body_impl(GridRange const& range, std::string_view horizontal, std::string_view vertical)
+      -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = BatchUpdateRequestsPayload{};
+    auto repeat  = RepeatCellPayload{
+         .range = {
+             .sheetId          = range.sheet_id,
+             .startRowIndex    = range.start_row,
+             .endRowIndex      = range.end_row,
+             .startColumnIndex = range.start_column,
+             .endColumnIndex   = range.end_column,
+        },
+    };
+
+    repeat.cell.userEnteredFormat = UserEnteredFormatPayload{
+        .horizontalAlignment = std::string{horizontal},
+        .verticalAlignment   = std::string{vertical},
+    };
+    repeat.fields = "userEnteredFormat.horizontalAlignment,userEnteredFormat.verticalAlignment";
+
+    payload.requests.push_back(BatchUpdateRequestsPayload::Request{.repeatCell = std::move(repeat)});
+
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build set cell alignment request body")};
+    }
+    return json;
   }
 
   /**
@@ -1221,6 +1310,103 @@ namespace detail {
       return std::unexpected{make_parse_error("failed to build update cell format request body")};
     }
     return json;
+  }
+
+  /**
+   * @brief repeatCell 用 JSON 本文を生成して文字スタイルを更新します。
+   * @param range 対象のセル範囲です。
+   * @param style 適用する文字スタイル設定です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
+   */
+  auto build_set_text_style_request_body(GridRange const& range, TextStyle const& style) -> std::expected<std::string, GoogleSheetsError> {
+    auto payload = BatchUpdateRequestsPayload{};
+    auto repeat  = RepeatCellPayload{
+         .range = {
+             .sheetId          = range.sheet_id,
+             .startRowIndex    = range.start_row,
+             .endRowIndex      = range.end_row,
+             .startColumnIndex = range.start_column,
+             .endColumnIndex   = range.end_column,
+        },
+    };
+
+    auto fields      = std::vector<std::string>{};
+    auto text_format = TextFormatPayload{};
+
+    if (style.font_family) {
+      text_format.fontFamily = *style.font_family;
+      fields.push_back("userEnteredFormat.textFormat.fontFamily");
+    }
+    if (style.font_size) {
+      text_format.fontSize = *style.font_size;
+      fields.push_back("userEnteredFormat.textFormat.fontSize");
+    }
+    if (style.bold) {
+      text_format.bold = *style.bold;
+      fields.push_back("userEnteredFormat.textFormat.bold");
+    }
+    if (style.italic) {
+      text_format.italic = *style.italic;
+      fields.push_back("userEnteredFormat.textFormat.italic");
+    }
+    if (style.strikethrough) {
+      text_format.strikethrough = *style.strikethrough;
+      fields.push_back("userEnteredFormat.textFormat.strikethrough");
+    }
+
+    if (fields.empty()) {
+      return std::unexpected{make_configuration_error("text style must specify at least one field")};
+    }
+
+    repeat.cell.userEnteredFormat = UserEnteredFormatPayload{
+        .textFormat = text_format,
+    };
+
+    for (auto const i : std::views::iota(0UZ, fields.size())) {
+      repeat.fields += fields[i];
+      if (i + 1U < fields.size()) {
+        repeat.fields += ",";
+      }
+    }
+
+    payload.requests.push_back(BatchUpdateRequestsPayload::Request{.repeatCell = std::move(repeat)});
+
+    auto json = std::string{};
+    if (auto const ec = glz::write_json(payload, json)) {
+      return std::unexpected{make_parse_error("failed to build set text style request body")};
+    }
+    return json;
+  }
+
+  /**
+   * @brief repeatCell 用 JSON 本文を生成してセル配置を更新します。
+   * @param range 対象のセル範囲です。
+   * @param horizontal 適用する水平配置です。
+   * @param vertical 適用する垂直配置です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
+   */
+  auto build_set_cell_alignment_request_body(GridRange const& range, HorizontalAlign horizontal, VerticalAlign vertical) -> std::expected<std::string, GoogleSheetsError> {
+    return build_set_cell_alignment_request_body_impl(range, to_api_alignment(horizontal), to_api_alignment(vertical));
+  }
+
+  /**
+   * @brief repeatCell 用 JSON 本文を生成してセル配置を更新します。
+   * @param range 対象のセル範囲です。
+   * @param horizontal 適用する水平配置文字列です。
+   * @param vertical 適用する垂直配置文字列です。
+   * @return 成功時は JSON 本文、失敗時は GoogleSheetsError です。
+   */
+  auto build_set_cell_alignment_request_body(GridRange const& range, std::string_view horizontal, std::string_view vertical)
+      -> std::expected<std::string, GoogleSheetsError> {
+    auto normalized_horizontal = normalize_horizontal_alignment(horizontal);
+    if (!normalized_horizontal) {
+      return std::unexpected{normalized_horizontal.error()};
+    }
+    auto normalized_vertical = normalize_vertical_alignment(vertical);
+    if (!normalized_vertical) {
+      return std::unexpected{normalized_vertical.error()};
+    }
+    return build_set_cell_alignment_request_body_impl(range, *normalized_horizontal, *normalized_vertical);
   }
 
   /**

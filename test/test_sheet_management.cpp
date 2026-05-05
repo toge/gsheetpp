@@ -301,6 +301,177 @@ TEST_CASE("update_cell_format_async successful execution", "[client]") {
   REQUIRE(result.has_value());
 }
 
+TEST_CASE("set_cell_alignment_async request body serialization", "[requests]") {
+  auto const range = gsheetpp::GridRange{
+      .sheet_id     = 0,
+      .start_row    = 2,
+      .end_row      = 4,
+      .start_column = 1,
+      .end_column   = 3,
+  };
+
+  auto const body = gsheetpp::detail::build_set_cell_alignment_request_body(
+      range,
+      gsheetpp::HorizontalAlign::center,
+      gsheetpp::VerticalAlign::middle);
+  REQUIRE(body.has_value());
+
+  CHECK(body->find("\"sheetId\":0") != std::string::npos);
+  CHECK(body->find("\"startRowIndex\":2") != std::string::npos);
+  CHECK(body->find("\"endRowIndex\":4") != std::string::npos);
+  CHECK(body->find("\"startColumnIndex\":1") != std::string::npos);
+  CHECK(body->find("\"endColumnIndex\":3") != std::string::npos);
+  CHECK(body->find("\"horizontalAlignment\":\"CENTER\"") != std::string::npos);
+  CHECK(body->find("\"verticalAlignment\":\"MIDDLE\"") != std::string::npos);
+  CHECK(body->find("\"fields\":\"userEnteredFormat.horizontalAlignment,userEnteredFormat.verticalAlignment\"") != std::string::npos);
+  CHECK(body->find("\"backgroundColor\"") == std::string::npos);
+}
+
+TEST_CASE("set_cell_alignment_async string normalization is case insensitive", "[requests]") {
+  auto const range = gsheetpp::GridRange{.sheet_id = 7};
+
+  auto const body = gsheetpp::detail::build_set_cell_alignment_request_body(range, "right", "bottom");
+  REQUIRE(body.has_value());
+
+  CHECK(body->find("\"sheetId\":7") != std::string::npos);
+  CHECK(body->find("\"horizontalAlignment\":\"RIGHT\"") != std::string::npos);
+  CHECK(body->find("\"verticalAlignment\":\"BOTTOM\"") != std::string::npos);
+}
+
+TEST_CASE("set_cell_alignment_async rejects invalid alignment strings", "[requests]") {
+  auto const range = gsheetpp::GridRange{.sheet_id = 1};
+
+  auto const body = gsheetpp::detail::build_set_cell_alignment_request_body(range, "diagonal", "middle");
+  REQUIRE_FALSE(body.has_value());
+  CHECK(body.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+}
+
+TEST_CASE("set_cell_alignment_async successful execution with string overload", "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key  = make_test_private_key(),
+      .token_uri    = "https://oauth2.googleapis.com/token",
+      .project_id   = "demo-project",
+  };
+
+  auto client = gsheetpp::detail::make_google_sheets_client_for_test(
+      config, [](gsheetpp::detail::HttpRequest const& request) -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body        = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        CHECK(request.method == "POST");
+        CHECK(request.body.find("\"repeatCell\"") != std::string::npos);
+        CHECK(request.body.find("\"horizontalAlignment\":\"LEFT\"") != std::string::npos);
+        CHECK(request.body.find("\"verticalAlignment\":\"TOP\"") != std::string::npos);
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body        = R"({"replies":[{}]})",
+        };
+      });
+
+  auto const range = gsheetpp::GridRange{.sheet_id = 0};
+  auto result      = client.set_cell_alignment_async("spreadsheet-id", range, "left", "top").get();
+  REQUIRE(result.has_value());
+}
+
+TEST_CASE("set_text_style_async request body serialization", "[requests]") {
+  auto const range = gsheetpp::GridRange{
+      .sheet_id     = 0,
+      .start_row    = 1,
+      .end_row      = 3,
+      .start_column = 0,
+      .end_column   = 2,
+  };
+  auto const style = gsheetpp::TextStyle{
+      .font_family   = "Arial",
+      .font_size     = 12,
+      .bold          = true,
+      .italic        = false,
+      .strikethrough = true,
+  };
+
+  auto const body = gsheetpp::detail::build_set_text_style_request_body(range, style);
+  REQUIRE(body.has_value());
+
+  CHECK(body->find("\"sheetId\":0") != std::string::npos);
+  CHECK(body->find("\"startRowIndex\":1") != std::string::npos);
+  CHECK(body->find("\"endRowIndex\":3") != std::string::npos);
+  CHECK(body->find("\"fontFamily\":\"Arial\"") != std::string::npos);
+  CHECK(body->find("\"fontSize\":12") != std::string::npos);
+  CHECK(body->find("\"bold\":true") != std::string::npos);
+  CHECK(body->find("\"italic\":false") != std::string::npos);
+  CHECK(body->find("\"strikethrough\":true") != std::string::npos);
+  CHECK(body->find("\"fields\":\"userEnteredFormat.textFormat.fontFamily,userEnteredFormat.textFormat.fontSize,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.italic,userEnteredFormat.textFormat.strikethrough\"") != std::string::npos);
+  CHECK(body->find("\"backgroundColor\"") == std::string::npos);
+  CHECK(body->find("\"horizontalAlignment\"") == std::string::npos);
+}
+
+TEST_CASE("set_text_style_async partial update serialization", "[requests]") {
+  auto const range = gsheetpp::GridRange{.sheet_id = 5};
+  auto const style = gsheetpp::TextStyle{
+      .italic = true,
+  };
+
+  auto const body = gsheetpp::detail::build_set_text_style_request_body(range, style);
+  REQUIRE(body.has_value());
+
+  CHECK(body->find("\"sheetId\":5") != std::string::npos);
+  CHECK(body->find("\"italic\":true") != std::string::npos);
+  CHECK(body->find("\"fontFamily\"") == std::string::npos);
+  CHECK(body->find("\"fontSize\"") == std::string::npos);
+  CHECK(body->find("\"bold\"") == std::string::npos);
+  CHECK(body->find("\"strikethrough\"") == std::string::npos);
+  CHECK(body->find("\"fields\":\"userEnteredFormat.textFormat.italic\"") != std::string::npos);
+}
+
+TEST_CASE("set_text_style_async rejects empty text style", "[requests]") {
+  auto const range = gsheetpp::GridRange{.sheet_id = 5};
+
+  auto const body = gsheetpp::detail::build_set_text_style_request_body(range, gsheetpp::TextStyle{});
+  REQUIRE_FALSE(body.has_value());
+  CHECK(body.error().kind == gsheetpp::GoogleSheetsErrorKind::configuration);
+}
+
+TEST_CASE("set_text_style_async successful execution", "[client]") {
+  auto const config = gsheetpp::ServiceAccountConfig{
+      .client_email = "svc@example.iam.gserviceaccount.com",
+      .private_key  = make_test_private_key(),
+      .token_uri    = "https://oauth2.googleapis.com/token",
+      .project_id   = "demo-project",
+  };
+
+  auto client = gsheetpp::detail::make_google_sheets_client_for_test(
+      config, [](gsheetpp::detail::HttpRequest const& request) -> std::expected<gsheetpp::detail::HttpResponse, gsheetpp::GoogleSheetsError> {
+        if (request.url == "https://oauth2.googleapis.com/token") {
+          return gsheetpp::detail::HttpResponse{
+              .status_code = 200,
+              .body        = R"({"access_token":"token-value","token_type":"Bearer","expires_in":3600})",
+          };
+        }
+
+        CHECK(request.method == "POST");
+        CHECK(request.body.find("\"repeatCell\"") != std::string::npos);
+        CHECK(request.body.find("\"fontFamily\":\"Arial\"") != std::string::npos);
+        CHECK(request.body.find("\"bold\":true") != std::string::npos);
+        return gsheetpp::detail::HttpResponse{
+            .status_code = 200,
+            .body        = R"({"replies":[{}]})",
+        };
+      });
+
+  auto const range = gsheetpp::GridRange{.sheet_id = 0};
+  auto const style = gsheetpp::TextStyle{
+      .font_family = "Arial",
+      .bold        = true,
+  };
+  auto result = client.set_text_style_async("spreadsheet-id", range, style).get();
+  REQUIRE(result.has_value());
+}
+
 TEST_CASE("freeze_panes_async request body serialization", "[requests]") {
   auto const body = gsheetpp::detail::build_freeze_panes_request_body(123, 2, 1);
   REQUIRE(body.has_value());

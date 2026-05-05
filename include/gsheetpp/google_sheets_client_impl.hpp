@@ -187,6 +187,33 @@ private:
   auto build_update_cell_format_request_body(GridRange const& range, CellFormat const& format) -> std::expected<std::string, GoogleSheetsError>;
 
   /**
+   * @brief repeatCell 用の JSON 本文を組み立てて文字スタイルを更新します。
+   * @param range 対象のセル範囲です。
+   * @param style 適用する文字スタイル設定です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
+   */
+  auto build_set_text_style_request_body(GridRange const& range, TextStyle const& style) -> std::expected<std::string, GoogleSheetsError>;
+
+  /**
+   * @brief repeatCell 用の JSON 本文を組み立ててセル配置を更新します。
+   * @param range 対象のセル範囲です。
+   * @param horizontal 水平配置です。
+   * @param vertical 垂直配置です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
+   */
+  auto build_set_cell_alignment_request_body(GridRange const& range, HorizontalAlign horizontal, VerticalAlign vertical) -> std::expected<std::string, GoogleSheetsError>;
+
+  /**
+   * @brief repeatCell 用の JSON 本文を組み立ててセル配置を更新します。
+   * @param range 対象のセル範囲です。
+   * @param horizontal 水平配置文字列です。
+   * @param vertical 垂直配置文字列です。
+   * @return 成功時は JSON 文字列、失敗時は GoogleSheetsError です。
+   */
+  auto build_set_cell_alignment_request_body(GridRange const& range, std::string_view horizontal, std::string_view vertical)
+      -> std::expected<std::string, GoogleSheetsError>;
+
+  /**
    * @brief 行・列の固定設定用の JSON 本文を組み立てます。
    * @param sheet_id 対象のシート ID です。
    * @param frozen_row_count 固定する行数です。
@@ -731,6 +758,152 @@ auto BasicGoogleSheetsClient<Auth>::update_cell_format_async(std::string_view sp
 
     return {};
   });
+}
+
+template <Authenticator Auth>
+/**
+ * @brief spreadsheets.batchUpdate を非同期実行して文字スタイルを更新します。
+ * @param spreadsheet_id 対象スプレッドシート ID です。
+ * @param range 対象のセル範囲です。
+ * @param style 適用する文字スタイル設定です。
+ * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+ */
+auto BasicGoogleSheetsClient<Auth>::set_text_style_async(std::string_view spreadsheet_id, GridRange const& range, TextStyle const& style)
+    -> std::future<std::expected<void, GoogleSheetsError>> {
+  auto const spreadsheet = std::string{spreadsheet_id};
+  return std::async(std::launch::async, [client = *this, spreadsheet, range, style]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_set_text_style_request_body(range, style);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
+    auto request = detail::HttpRequest{
+        .method  = "POST",
+        .url     = detail::build_batch_update_url(spreadsheet),
+        .headers = {"Content-Type: application/json"},
+        .body    = *std::move(body),
+    };
+    auto prepared = client.prepare_request(request, true);
+    if (!prepared) {
+      return std::unexpected{prepared.error()};
+    }
+
+    auto response = client.execute_request(std::move(request), true);
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto api_error = detail::parse_api_error_response(response->body);
+      return std::unexpected{GoogleSheetsError{
+          .kind          = GoogleSheetsErrorKind::api_response,
+          .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
+          .http_status   = response->status_code,
+          .response_body = response->body,
+      }};
+    }
+
+    return {};
+  });
+}
+
+template <Authenticator Auth>
+/**
+ * @brief spreadsheets.batchUpdate を非同期実行してセル配置を更新します。
+ * @param spreadsheet_id 対象スプレッドシート ID です。
+ * @param range 対象のセル範囲です。
+ * @param horizontal 水平配置です。
+ * @param vertical 垂直配置です。
+ * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+ */
+auto BasicGoogleSheetsClient<Auth>::set_cell_alignment_async(
+    std::string_view spreadsheet_id,
+    GridRange const& range,
+    HorizontalAlign horizontal,
+    VerticalAlign vertical) -> std::future<std::expected<void, GoogleSheetsError>> {
+  auto const spreadsheet = std::string{spreadsheet_id};
+  return std::async(std::launch::async, [client = *this, spreadsheet, range, horizontal, vertical]() mutable -> std::expected<void, GoogleSheetsError> {
+    auto body = detail::build_set_cell_alignment_request_body(range, horizontal, vertical);
+    if (!body) {
+      return std::unexpected{body.error()};
+    }
+    auto request = detail::HttpRequest{
+        .method  = "POST",
+        .url     = detail::build_batch_update_url(spreadsheet),
+        .headers = {"Content-Type: application/json"},
+        .body    = *std::move(body),
+    };
+    auto prepared = client.prepare_request(request, true);
+    if (!prepared) {
+      return std::unexpected{prepared.error()};
+    }
+
+    auto response = client.execute_request(std::move(request), true);
+    if (!response) {
+      return std::unexpected{response.error()};
+    }
+    if (response->status_code >= 400) {
+      auto api_error = detail::parse_api_error_response(response->body);
+      return std::unexpected{GoogleSheetsError{
+          .kind          = GoogleSheetsErrorKind::api_response,
+          .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
+          .http_status   = response->status_code,
+          .response_body = response->body,
+      }};
+    }
+
+    return {};
+  });
+}
+
+template <Authenticator Auth>
+/**
+ * @brief spreadsheets.batchUpdate を非同期実行してセル配置を更新します。
+ * @param spreadsheet_id 対象スプレッドシート ID です。
+ * @param range 対象のセル範囲です。
+ * @param horizontal 水平配置文字列です。
+ * @param vertical 垂直配置文字列です。
+ * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+ */
+auto BasicGoogleSheetsClient<Auth>::set_cell_alignment_async(
+    std::string_view spreadsheet_id,
+    GridRange const& range,
+    std::string_view horizontal,
+    std::string_view vertical) -> std::future<std::expected<void, GoogleSheetsError>> {
+  auto const spreadsheet      = std::string{spreadsheet_id};
+  auto const horizontal_value = std::string{horizontal};
+  auto const vertical_value   = std::string{vertical};
+  return std::async(std::launch::async,
+                    [client = *this, spreadsheet, range, horizontal_value, vertical_value]() mutable -> std::expected<void, GoogleSheetsError> {
+                      auto body = detail::build_set_cell_alignment_request_body(range, horizontal_value, vertical_value);
+                      if (!body) {
+                        return std::unexpected{body.error()};
+                      }
+                      auto request = detail::HttpRequest{
+                          .method  = "POST",
+                          .url     = detail::build_batch_update_url(spreadsheet),
+                          .headers = {"Content-Type: application/json"},
+                          .body    = *std::move(body),
+                      };
+                      auto prepared = client.prepare_request(request, true);
+                      if (!prepared) {
+                        return std::unexpected{prepared.error()};
+                      }
+
+                      auto response = client.execute_request(std::move(request), true);
+                      if (!response) {
+                        return std::unexpected{response.error()};
+                      }
+                      if (response->status_code >= 400) {
+                        auto api_error = detail::parse_api_error_response(response->body);
+                        return std::unexpected{GoogleSheetsError{
+                            .kind          = GoogleSheetsErrorKind::api_response,
+                            .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
+                            .http_status   = response->status_code,
+                            .response_body = response->body,
+                        }};
+                      }
+
+                      return {};
+                    });
 }
 
 template <Authenticator Auth>

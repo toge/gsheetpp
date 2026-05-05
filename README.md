@@ -97,6 +97,58 @@ client.update_cell_format_async("spreadsheet-id", range, format).get();
 
 `CellFormat` の各フィールドは `std::optional` なので、更新したい項目だけを指定でき、他の書式を破壊しません。
 
+## 文字スタイルの更新
+
+`set_text_style_async` を使用して、指定した範囲の `fontFamily`、`fontSize`、`bold`、`italic`、`strikethrough` を一括で更新できます。
+
+```cpp
+auto const range = gsheetpp::GridRange{
+  .sheet_id = 0,
+  .start_row = 0,
+  .end_row = 3,
+  .start_column = 0,
+  .end_column = 2
+};
+
+auto const style = gsheetpp::TextStyle{
+  .font_family = "Arial",
+  .font_size = 14,
+  .bold = true
+};
+
+client.set_text_style_async("spreadsheet-id", range, style).get();
+```
+
+`set_text_style_async` は `textFormat` 系の更新専用で、背景色や配置は変更しません。未指定の文字スタイルも field mask に含めないため、そのまま維持されます。
+
+## セル配置の更新
+
+`set_cell_alignment_async` を使用して、指定した範囲の水平配置と垂直配置を一括で更新できます。
+
+```cpp
+auto const range = gsheetpp::GridRange{
+  .sheet_id = 0,
+  .start_row = 0,
+  .end_row = 3,
+  .start_column = 0,
+  .end_column = 2
+};
+
+client.set_cell_alignment_async(
+  "spreadsheet-id",
+  range,
+  gsheetpp::HorizontalAlign::center,
+  gsheetpp::VerticalAlign::middle).get();
+
+client.set_cell_alignment_async(
+  "spreadsheet-id",
+  range,
+  "right",
+  "bottom").get();
+```
+
+この API は `repeatCell` の `fields` に `userEnteredFormat.horizontalAlignment,userEnteredFormat.verticalAlignment` だけを指定するため、既存の背景色や枠線には影響しません。
+
 ## 行・列の固定
 
 `freeze_panes_async` を使用して、指定したシートの行や列を固定できます。

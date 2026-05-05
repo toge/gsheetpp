@@ -142,12 +142,41 @@ struct Color {
 };
 
 /**
+ * @brief セル内テキストの水平配置です。
+ */
+enum class HorizontalAlign {
+  left,
+  center,
+  right,
+};
+
+/**
+ * @brief セル内テキストの垂直配置です。
+ */
+enum class VerticalAlign {
+  top,
+  middle,
+  bottom,
+};
+
+/**
  * @brief セルの書式設定を表します。
  */
 struct CellFormat {
   std::optional<Color> background_color{};  ///< 背景色です。
   std::optional<Color> foreground_color{};  ///< 文字色です。
   std::optional<bool>  bold{};              ///< 太字にするかどうかです。
+};
+
+/**
+ * @brief セル内テキストのスタイル設定を表します。
+ */
+struct TextStyle {
+  std::optional<std::string> font_family{};    ///< フォントファミリーです。
+  std::optional<int>         font_size{};      ///< フォントサイズです。
+  std::optional<bool>        bold{};           ///< 太字にするかどうかです。
+  std::optional<bool>        italic{};         ///< 斜体にするかどうかです。
+  std::optional<bool>        strikethrough{};  ///< 取り消し線を付けるかどうかです。
 };
 
 /**
@@ -364,6 +393,37 @@ class BasicGoogleSheetsClient {
    * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
    */
   auto update_cell_format_async(std::string_view spreadsheet_id, GridRange const& range, CellFormat const& format) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定範囲の文字スタイルを非同期で一括更新します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range 対象のセル範囲（インデックス指定）です。
+   * @param style 適用する文字スタイル設定です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto set_text_style_async(std::string_view spreadsheet_id, GridRange const& range, TextStyle const& style) -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定範囲のセル配置を非同期で一括更新します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range 対象のセル範囲（インデックス指定）です。
+   * @param horizontal 水平配置です。
+   * @param vertical 垂直配置です。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto set_cell_alignment_async(std::string_view spreadsheet_id, GridRange const& range, HorizontalAlign horizontal, VerticalAlign vertical)
+      -> std::future<std::expected<void, GoogleSheetsError>>;
+
+  /**
+   * @brief 指定範囲のセル配置を非同期で一括更新します。
+   * @param spreadsheet_id 対象スプレッドシート ID です。
+   * @param range 対象のセル範囲（インデックス指定）です。
+   * @param horizontal 水平配置です。LEFT/CENTER/RIGHT を大文字小文字非依存で受け付けます。
+   * @param vertical 垂直配置です。TOP/MIDDLE/BOTTOM を大文字小文字非依存で受け付けます。
+   * @return 成功時は void、失敗時は GoogleSheetsError を返す future です。
+   */
+  auto set_cell_alignment_async(std::string_view spreadsheet_id, GridRange const& range, std::string_view horizontal, std::string_view vertical)
+      -> std::future<std::expected<void, GoogleSheetsError>>;
 
   /**
    * @brief 指定したシートの行・列の固定設定を非同期で更新します。
