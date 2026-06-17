@@ -3,13 +3,24 @@
 /**
  * @file google_sheets_client.hpp
  * @brief Google Sheets API v4 向けクライアントの公開 API を定義します。
+ *
+ * このヘッダは「クライアント API」と「公開モデル型」のみを宣言し、
+ * 内部実装 (transport 関数・共有状態・RAII ガードなど) は gsheetpp/detail/ 以下に
+ * 分離しています。利用者が gsheetpp を使う際に追加で include する必要はなく、
+ * このヘッダ 1 つで完全なクライアント API が得られます。
+ *
+ * std::expected について:
+ *   C++23 以降は <expected> 標準ヘッダを利用します。標準が利用できない場合
+ *   (C++20 ビルド時) は std::expected が定義されたヘッダが必要です。
+ *   現在の実装は C++20/23/26 すべてで同じヘッダを include します。
  */
 
-#include <chrono>
+#include "gsheetpp/detail/internal_types.hpp"
+#include "gsheetpp/detail/oauth_token_response.hpp"
+#include "gsheetpp/detail/refresh_in_progress_guard.hpp"
+
 #include <concepts>
-#include <condition_variable>
 #include <expected>
-#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -22,29 +33,6 @@
 #include <vector>
 
 namespace gsheetpp {
-
-/**
- * @brief Google Sheets クライアントが返すエラーの大分類です。
- */
-enum class GoogleSheetsErrorKind {
-  configuration,   ///< 構成値不足や不正な認証設定などの事前条件違反です。
-  serialization,   ///< JSON などのシリアライズ・デシリアライズ失敗です。
-  jwt_signing,     ///< JWT 署名の生成に失敗したことを表します。
-  network,         ///< HTTP 送信前後のネットワーク層エラーです。
-  http,            ///< HTTP 応答は得られたが期待形式では扱えない失敗です。
-  authentication,  ///< トークン取得・更新など認証そのものの失敗です。
-  api_response,    ///< Google API が返した業務エラー応答です。
-};
-
-/**
- * @brief クライアントが返す失敗情報です。
- */
-struct GoogleSheetsError {
-  GoogleSheetsErrorKind kind{GoogleSheetsErrorKind::configuration};  ///< エラー種別です。
-  std::string           message{};                                   ///< 人間可読な失敗理由です。
-  std::optional<long>   http_status{};                               ///< HTTP ステータスです。
-  std::string           response_body{};                             ///< 失敗時の生レスポンス本文です。
-};
 
 /**
  * @brief API Key 認証の設定です。
@@ -117,12 +105,10 @@ struct UserOAuth2Auth {
 
 /**
  * @brief 認証サーバーから取得したアクセストークン情報です。
- */
-struct TokenInfo {
-  std::string access_token{};        ///< Bearer などのアクセストークン値です。
-  std::string token_type{};          ///< Bearer や ApiKey などのトークン種別です。
-  long        expires_in_seconds{};  ///< 発行時点からの有効秒数です。
-};
+ *
+ * TokenInfo は gsheetpp/detail/internal_types.hpp で定義済みのため、
+ * ここでは再宣言しません。
+ */;
 
 /**
  * @brief スプレッドシート内の各シート（タブ）の情報を保持します。
@@ -248,52 +234,6 @@ struct WriteValuesResult {
   long        updated_cells{};    ///< 更新されたセル数です。
 };
 
-namespace detail {
-
-  /**
-   * @brief トランスポート層へ渡す HTTP リクエスト表現です。
-   */
-  struct HttpRequest {
-    std::string              method{};   ///< GET / POST / PUT などの HTTP メソッドです。
-    std::string              url{};      ///< 絶対 URL です。
-    std::vector<std::string> headers{};  ///< `Key: Value` 形式のヘッダー一覧です。
-    std::string              body{};     ///< 送信本文です。
-  };
-
-  /**
-   * @brief トランスポート層から返る HTTP 応答表現です。
-   */
-  struct HttpResponse {
-    long        status_code{};  ///< HTTP ステータスコードです。
-    std::string body{};         ///< 応答本文です。
-  };
-
-  /**
-   * @brief HTTP リクエスト実行関数の型です。
-   */
-  using TransportFunction = std::function<std::expected<HttpResponse, GoogleSheetsError>(HttpRequest const&)>;
-
-  /**
-   * @brief 現在時刻取得関数の型です。
-   *
-   * テストでは疑似時刻を注入するために使います。
-   */
-  using ClockFunction = std::function<std::chrono::system_clock::time_point()>;
-
-  /**
-   * @brief クライアント複製間で共有する認証キャッシュ状態です。
-   */
-  struct ClientSharedState {
-    std::mutex                            mutex{};                ///< 共有トークン状態全体を保護します。
-    std::condition_variable               cv{};                   ///< refresh 完了待機に使います。
-    bool                                  refresh_in_progress{};  ///< いま別スレッドが refresh しているかどうかです。
-    std::optional<TokenInfo>              token{};                ///< 最後に取得したアクセストークンです。
-    std::optional<std::string>            refresh_token{};        ///< 最新 refresh token の共有コピーです。
-    std::chrono::system_clock::time_point expires_at{};           ///< token の失効予定時刻です。
-  };
-
-}  // namespace detail
-
 template <class T>
 concept Authenticator = std::same_as<std::remove_cvref_t<T>, ApiKeyAuth> || std::same_as<std::remove_cvref_t<T>, ServiceAccountConfig> || std::same_as<std::remove_cvref_t<T>, UserOAuth2Auth>;
 
@@ -302,6 +242,17 @@ class BasicGoogleSheetsClient;
 
 /**
  * @brief 認証方式を型で切り替えられる Google Sheets クライアントです。
+ *
+ * スレッド安全性:
+ *   - 同一インスタンスの *非 mutating* メソッド (read / write / *_async の各 GET) は
+ *     複数スレッドから同時に呼び出せます。内部で ClientSharedState (mutex + cv) を
+ *     通してアクセストークン更新が直列化されます。
+ *   - set_authenticator / authenticator() は内部状態を変更するため、
+ *     他のメソッド実行中に行ってはいけません。複数スレッドから構築・切替を行う場合は
+ *     呼び出し側で mutex 等で直列化してください。
+ *   - ユーザー委譲 OAuth2 (UserOAuth2Auth) では 401 応答を受けた場合に
+ *     最大 1 回だけアクセストークンを更新してリトライします。並行リクエスト間で
+ *     refresh は 1 本化されます。
  * @tparam Auth 利用する認証設定型です。
  */
 template <Authenticator Auth>
@@ -321,9 +272,40 @@ class BasicGoogleSheetsClient {
    */
   BasicGoogleSheetsClient(Auth auth, detail::TransportFunction transport, detail::ClockFunction clock = {});
 
+  /**
+   * @brief コピーコンストラクタです。内部実装を共有して複製します。
+   */
+  BasicGoogleSheetsClient(BasicGoogleSheetsClient const& other);
+
+  /**
+   * @brief ムーブコンストラクタです。
+   */
+  BasicGoogleSheetsClient(BasicGoogleSheetsClient&& other) noexcept;
+
+  /**
+   * @brief コピー代入演算子です。
+   */
+  auto operator=(BasicGoogleSheetsClient const& other) -> BasicGoogleSheetsClient&;
+
+  /**
+   * @brief ムーブ代入演算子です。
+   */
+  auto operator=(BasicGoogleSheetsClient&& other) noexcept -> BasicGoogleSheetsClient&;
+
+  /**
+   * @brief デストラクタを PIMPL 完全型が見える場所で default 定義します。
+   *
+   * ヘッダ上で std::unique_ptr<Impl> の所有権解放を成立させるために、
+   * デストラクタをここで宣言だけ行い google_sheets_client_impl.hpp 内で
+   * 定義します。
+   */
+  ~BasicGoogleSheetsClient();
+
   template <Authenticator OtherAuth>
   /**
    * @brief transport / clock を引き継いだまま別認証方式へ再束縛します。
+   *
+   * 認証キャッシュ (アクセストークン) は新しいクライアントには引き継がれません。
    * @tparam OtherAuth 新しい認証設定型です。
    * @param auth 新しい認証設定です。
    * @return 新しい認証型で構築されたクライアントです。
@@ -492,17 +474,19 @@ class BasicGoogleSheetsClient {
 
   /**
    * @brief 現在の認証設定を可変参照で返します。
-
-
+   *
+   * @warning この参照を通じて認証設定を書き換えた場合、内部状態との整合性は
+   *          呼び出し側の責任で管理してください。複数スレッドから同時に書き換える操作は
+   *          サポートされません。
    * @return 内部保持している認証設定です。
    */
-  auto authenticator() -> Auth& { return *auth_; }
+  auto authenticator() -> Auth& { return *impl_->auth; }
 
   /**
    * @brief 現在の認証設定を読み取り専用参照で返します。
    * @return 内部保持している認証設定です。
    */
-  auto authenticator() const -> Auth const& { return *auth_; }
+  auto authenticator() const -> Auth const& { return *impl_->auth; }
 
   private:
   /**
@@ -521,10 +505,26 @@ class BasicGoogleSheetsClient {
    */
   auto execute_request(detail::HttpRequest request, bool retry_on_unauthorized) -> std::expected<detail::HttpResponse, GoogleSheetsError>;
 
-  std::shared_ptr<Auth>                      auth_{};          ///< 認証設定本体です。
-  detail::TransportFunction                  transport_{};     ///< 実際の HTTP 実行手段です。
-  detail::ClockFunction                      clock_{};         ///< 現在時刻供給元です。
-  std::shared_ptr<detail::ClientSharedState> shared_state_{};  ///< 複製間共有キャッシュです。
+  /**
+   * @brief 非同期実行を async ポリシーで起動する内部ヘルパです。
+   *
+   * std::launch::async | std::launch::deferred ではなく、必ず async で
+   * スレッドを起動します。これにより .get() まで実行が遅延する deferred 経路や
+   * 標準ライブラリ実装依存の挙動を排除します。
+   */
+  template <class Fn>
+  static auto run_async(Fn&& fn) -> std::future<std::invoke_result_t<Fn>>;
+
+  /**
+   * @brief 実装詳細を隠蔽する PIMPL 構造体です。
+   *
+   * 内部実装 (TransportFunction / ClockFunction / ClientSharedState / 認証ポインタ)
+   * はこの構造体に閉じ込めており、フィールド追加に対する利用者コードの
+   * 再コンパイルを最小化します。
+   */
+  struct Impl;
+
+  std::unique_ptr<Impl> impl_;  ///< 内部実装ハンドルです。
 };
 
 using GoogleSheetsClient = BasicGoogleSheetsClient<ServiceAccountConfig>;

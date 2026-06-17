@@ -3,50 +3,20 @@
 /**
  * @file google_sheets_client_impl.hpp
  * @brief BasicGoogleSheetsClient のテンプレート実装を定義します。
+ *
+ * このヘッダは google_sheets_client.hpp の末尾から #include されます。
+ * 利用者が直接 include する必要はありません。
  */
+
+#include "gsheetpp/google_sheets_client.hpp"
+
+#include <future>
+#include <type_traits>
+#include <utility>
 
 namespace gsheetpp {
 
 namespace detail {
-
-  /**
-   * @brief OAuth2 トークン応答のうち refresh token を保持できる形です。
-   */
-  struct OAuthTokenResponse {
-    TokenInfo                  token{};          ///< 取得したアクセストークンです。
-    std::optional<std::string> refresh_token{};  ///< 新たに払い出された refresh token です。
-  };
-
-  /**
-   * @brief refresh 中フラグを例外安全に解除する RAII ガードです。
-   *
-   * token 取得処理の途中で失敗しても待機中スレッドが永続停止しないようにします。
-   */
-  class RefreshInProgressGuard {
-public:
-    /**
-     * @brief ガード対象を初期化します。
-     * @param mutex refresh 状態を保護する mutex です。
-     * @param cv refresh 完了通知用の condition_variable です。
-     * @param refresh_in_progress refresh 中フラグへの参照です。
-     */
-    RefreshInProgressGuard(std::mutex& mutex, std::condition_variable& cv, bool& refresh_in_progress) noexcept;
-
-    RefreshInProgressGuard(RefreshInProgressGuard const&)                    = delete;
-    auto operator=(RefreshInProgressGuard const&) -> RefreshInProgressGuard& = delete;
-    RefreshInProgressGuard(RefreshInProgressGuard&&)                         = delete;
-    auto operator=(RefreshInProgressGuard&&) -> RefreshInProgressGuard&      = delete;
-
-    /**
-     * @brief refresh 中フラグを解除し、待機中スレッドへ通知します。
-     */
-    ~RefreshInProgressGuard() noexcept;
-
-private:
-    std::mutex&              mutex_;                ///< 状態更新を直列化する mutex です。
-    std::condition_variable& cv_;                   ///< 待機解除通知に使う condition_variable です。
-    bool&                    refresh_in_progress_;  ///< 解除対象の refresh 中フラグです。
-  };
 
   /**
    * @brief libcurl ベースのデフォルト transport を返します。
@@ -340,6 +310,63 @@ private:
 
 }  // namespace detail
 
+/**
+ * @brief BasicGoogleSheetsClient の実装詳細を保持する PIMPL 構造体です。
+ *
+ * 公開ヘッダから内部状態 (TransportFunction / ClockFunction / ClientSharedState
+ * など) を追い出し、利用者の翻訳単位に対する ABI 影響を抑えます。
+ */
+template <Authenticator Auth>
+struct BasicGoogleSheetsClient<Auth>::Impl {
+  std::shared_ptr<Auth>                      auth{};          ///< 認証設定本体です。
+  detail::TransportFunction                  transport{};     ///< 実際の HTTP 実行手段です。
+  detail::ClockFunction                      clock{};         ///< 現在時刻供給元です。
+  std::shared_ptr<detail::ClientSharedState> shared_state{};  ///< 複製間共有キャッシュです。
+};
+
+template <Authenticator Auth>
+template <class Fn>
+/**
+ * @brief std::async の起動ポリシーを async 固定に統一する内部ヘルパです。
+ *
+ * std::async(std::launch::async | std::launch::deferred, ...) を直接使うと
+ * 実装によっては .get() まで実行が遅延する経路が選ばれてしまうため、
+ * ライブラリ全体の方針として「即時に別スレッドへ逃がす」挙動を保証します。
+ */
+auto BasicGoogleSheetsClient<Auth>::run_async(Fn&& fn) -> std::future<std::invoke_result_t<Fn>> {
+  return std::async(std::launch::async, std::forward<Fn>(fn));
+}
+
+template <Authenticator Auth>
+/**
+ * @brief コピーコンストラクタです。auth / transport / clock / shared_state を
+ *        浅く共有して複製します。共有 token キャッシュはコピー後も一貫しています。
+ */
+BasicGoogleSheetsClient<Auth>::BasicGoogleSheetsClient(BasicGoogleSheetsClient const& other) : impl_{std::make_unique<Impl>(*other.impl_)} {}
+
+template <Authenticator Auth>
+/**
+ * @brief ムーブコンストラクタです。
+ */
+BasicGoogleSheetsClient<Auth>::BasicGoogleSheetsClient(BasicGoogleSheetsClient&& other) noexcept = default;
+
+template <Authenticator Auth>
+/**
+ * @brief コピー代入演算子です。
+ */
+auto BasicGoogleSheetsClient<Auth>::operator=(BasicGoogleSheetsClient const& other) -> BasicGoogleSheetsClient& {
+  if (this != &other) {
+    impl_ = std::make_unique<Impl>(*other.impl_);
+  }
+  return *this;
+}
+
+template <Authenticator Auth>
+/**
+ * @brief ムーブ代入演算子です。
+ */
+auto BasicGoogleSheetsClient<Auth>::operator=(BasicGoogleSheetsClient&& other) noexcept -> BasicGoogleSheetsClient& = default;
+
 template <Authenticator Auth>
 /**
  * @brief デフォルト transport を用いてクライアントを初期化します。
@@ -355,7 +382,18 @@ template <Authenticator Auth>
  * @param clock 現在時刻取得関数です。
  */
 BasicGoogleSheetsClient<Auth>::BasicGoogleSheetsClient(Auth auth, detail::TransportFunction transport, detail::ClockFunction clock)
-    : auth_{std::make_shared<Auth>(std::move(auth))}, transport_{std::move(transport)}, clock_{std::move(clock)}, shared_state_{std::make_shared<detail::ClientSharedState>()} {}
+    : impl_{std::make_unique<Impl>()} {
+  impl_->auth         = std::make_shared<Auth>(std::move(auth));
+  impl_->transport    = std::move(transport);
+  impl_->clock        = std::move(clock);
+  impl_->shared_state = std::make_shared<detail::ClientSharedState>();
+}
+
+/**
+ * @brief PIMPL 構造体が見えて初めて default 化できるデストラクタを定義します。
+ */
+template <Authenticator Auth>
+BasicGoogleSheetsClient<Auth>::~BasicGoogleSheetsClient() = default;
 
 template <Authenticator Auth>
 template <Authenticator OtherAuth>
@@ -368,8 +406,8 @@ template <Authenticator OtherAuth>
 auto BasicGoogleSheetsClient<Auth>::set_authenticator(OtherAuth auth) const -> BasicGoogleSheetsClient<OtherAuth> {
   return BasicGoogleSheetsClient<OtherAuth>{
       std::move(auth),
-      transport_,
-      clock_,
+      impl_->transport,
+      impl_->clock,
   };
 }
 
@@ -379,7 +417,7 @@ template <Authenticator Auth>
  * @return 成功時は TokenInfo、失敗時は GoogleSheetsError を返す future です。
  */
 auto BasicGoogleSheetsClient<Auth>::authenticate_async() -> std::future<std::expected<TokenInfo, GoogleSheetsError>> {
-  return std::async(std::launch::async, [client = *this]() mutable -> std::expected<TokenInfo, GoogleSheetsError> {
+  return run_async([client = *this]() mutable -> std::expected<TokenInfo, GoogleSheetsError> {
     if constexpr (std::same_as<Auth, ApiKeyAuth>) {
       return TokenInfo{
           .access_token       = "",
@@ -387,9 +425,9 @@ auto BasicGoogleSheetsClient<Auth>::authenticate_async() -> std::future<std::exp
           .expires_in_seconds = 0,
       };
     } else if constexpr (std::same_as<Auth, ServiceAccountConfig>) {
-      return detail::get_valid_token(*client.auth_, client.shared_state_, client.transport_, client.clock_);
+      return detail::get_valid_token(*client.impl_->auth, client.impl_->shared_state, client.impl_->transport, client.impl_->clock);
     } else {
-      return detail::get_valid_token(*client.auth_, client.shared_state_, client.transport_, client.clock_);
+      return detail::get_valid_token(*client.impl_->auth, client.impl_->shared_state, client.impl_->transport, client.impl_->clock);
     }
   });
 }
@@ -402,7 +440,7 @@ template <Authenticator Auth>
  */
 auto BasicGoogleSheetsClient<Auth>::get_sheets_async(std::string_view spreadsheet_id) -> std::future<std::expected<std::vector<SheetMetadata>, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet]() mutable -> std::expected<std::vector<SheetMetadata>, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet]() mutable -> std::expected<std::vector<SheetMetadata>, GoogleSheetsError> {
     auto url     = detail::build_spreadsheet_url(spreadsheet);
     url          = detail::append_query_parameter(std::move(url), "fields", "sheets(properties(title,sheetId))");
     auto request = detail::HttpRequest{
@@ -450,7 +488,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::read_values_async(std::string_view spreadsheet_id, std::string_view range) -> std::future<std::expected<ReadValuesResult, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   auto const read_range  = std::string{range};
-  return std::async(std::launch::async, [client = *this, spreadsheet, read_range]() mutable -> std::expected<ReadValuesResult, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, read_range]() mutable -> std::expected<ReadValuesResult, GoogleSheetsError> {
     auto request = detail::HttpRequest{
         .method = "GET",
         .url    = detail::build_values_url(spreadsheet, read_range),
@@ -500,7 +538,7 @@ auto BasicGoogleSheetsClient<Auth>::write_values_async(std::string_view spreadsh
   auto const spreadsheet = std::string{spreadsheet_id};
   auto const write_range = std::string{range};
   auto const values      = std::vector<std::vector<std::string>>{data.begin(), data.end()};
-  return std::async(std::launch::async, [client = *this, spreadsheet, write_range, values]() mutable -> std::expected<WriteValuesResult, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, write_range, values]() mutable -> std::expected<WriteValuesResult, GoogleSheetsError> {
     auto body = detail::build_write_values_request_body(values);
     if (!body) {
       return std::unexpected{body.error()};
@@ -564,7 +602,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::add_sheet_async(std::string_view spreadsheet_id, std::string_view title) -> std::future<std::expected<SheetMetadata, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   auto const sheet_title = std::string{title};
-  return std::async(std::launch::async, [client = *this, spreadsheet, sheet_title]() mutable -> std::expected<SheetMetadata, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, sheet_title]() mutable -> std::expected<SheetMetadata, GoogleSheetsError> {
     auto body = detail::build_add_sheet_request_body(sheet_title);
     if (!body) {
       return std::unexpected{body.error()};
@@ -609,7 +647,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::rename_sheet_async(std::string_view spreadsheet_id, int sheet_id, std::string_view new_title) -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
   auto const title       = std::string{new_title};
-  return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id, title]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, sheet_id, title]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_rename_sheet_request_body(sheet_id, title);
     if (!body) {
       return std::unexpected{body.error()};
@@ -652,7 +690,7 @@ template <Authenticator Auth>
  */
 auto BasicGoogleSheetsClient<Auth>::delete_sheet_async(std::string_view spreadsheet_id, int sheet_id) -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, sheet_id]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_delete_sheet_request_body(sheet_id);
     if (!body) {
       return std::unexpected{body.error()};
@@ -696,7 +734,7 @@ template <Authenticator Auth>
  */
 auto BasicGoogleSheetsClient<Auth>::reorder_sheet_async(std::string_view spreadsheet_id, int sheet_id, int new_index) -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id, new_index]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, sheet_id, new_index]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_reorder_sheet_request_body(sheet_id, new_index);
     if (!body) {
       return std::unexpected{body.error()};
@@ -741,7 +779,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::update_cell_format_async(std::string_view spreadsheet_id, GridRange const& range, CellFormat const& format)
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, range, format]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, range, format]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_update_cell_format_request_body(range, format);
     if (!body) {
       return std::unexpected{body.error()};
@@ -786,7 +824,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::set_text_style_async(std::string_view spreadsheet_id, GridRange const& range, TextStyle const& style)
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, range, style]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, range, style]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_set_text_style_request_body(range, style);
     if (!body) {
       return std::unexpected{body.error()};
@@ -835,7 +873,7 @@ auto BasicGoogleSheetsClient<Auth>::set_cell_alignment_async(
     HorizontalAlign horizontal,
     VerticalAlign vertical) -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, range, horizontal, vertical]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, range, horizontal, vertical]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_set_cell_alignment_request_body(range, horizontal, vertical);
     if (!body) {
       return std::unexpected{body.error()};
@@ -886,39 +924,39 @@ auto BasicGoogleSheetsClient<Auth>::set_cell_alignment_async(
   auto const spreadsheet      = std::string{spreadsheet_id};
   auto const horizontal_value = std::string{horizontal};
   auto const vertical_value   = std::string{vertical};
-  return std::async(std::launch::async,
-                    [client = *this, spreadsheet, range, horizontal_value, vertical_value]() mutable -> std::expected<void, GoogleSheetsError> {
-                      auto body = detail::build_set_cell_alignment_request_body(range, horizontal_value, vertical_value);
-                      if (!body) {
-                        return std::unexpected{body.error()};
-                      }
-                      auto request = detail::HttpRequest{
-                          .method  = "POST",
-                          .url     = detail::build_batch_update_url(spreadsheet),
-                          .headers = {"Content-Type: application/json"},
-                          .body    = *std::move(body),
-                      };
-                      auto prepared = client.prepare_request(request, true);
-                      if (!prepared) {
-                        return std::unexpected{prepared.error()};
-                      }
+  return run_async(
+      [client = *this, spreadsheet, range, horizontal_value, vertical_value]() mutable -> std::expected<void, GoogleSheetsError> {
+        auto body = detail::build_set_cell_alignment_request_body(range, horizontal_value, vertical_value);
+        if (!body) {
+          return std::unexpected{body.error()};
+        }
+        auto request = detail::HttpRequest{
+            .method  = "POST",
+            .url     = detail::build_batch_update_url(spreadsheet),
+            .headers = {"Content-Type: application/json"},
+            .body    = *std::move(body),
+        };
+        auto prepared = client.prepare_request(request, true);
+        if (!prepared) {
+          return std::unexpected{prepared.error()};
+        }
 
-                      auto response = client.execute_request(std::move(request), true);
-                      if (!response) {
-                        return std::unexpected{response.error()};
-                      }
-                      if (response->status_code >= 400) {
-                        auto api_error = detail::parse_api_error_response(response->body);
-                        return std::unexpected{GoogleSheetsError{
-                            .kind          = GoogleSheetsErrorKind::api_response,
-                            .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
-                            .http_status   = response->status_code,
-                            .response_body = response->body,
-                        }};
-                      }
+        auto response = client.execute_request(std::move(request), true);
+        if (!response) {
+          return std::unexpected{response.error()};
+        }
+        if (response->status_code >= 400) {
+          auto api_error = detail::parse_api_error_response(response->body);
+          return std::unexpected{GoogleSheetsError{
+              .kind          = GoogleSheetsErrorKind::api_response,
+              .message       = (!api_error || api_error->empty()) ? "google api request failed" : *api_error,
+              .http_status   = response->status_code,
+              .response_body = response->body,
+          }};
+        }
 
-                      return {};
-                    });
+        return {};
+      });
 }
 
 template <Authenticator Auth>
@@ -933,7 +971,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::freeze_panes_async(std::string_view spreadsheet_id, int sheet_id, int frozen_row_count, int frozen_column_count)
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, sheet_id, frozen_row_count, frozen_column_count]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, sheet_id, frozen_row_count, frozen_column_count]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_freeze_panes_request_body(sheet_id, frozen_row_count, frozen_column_count);
     if (!body) {
       return std::unexpected{body.error()};
@@ -977,7 +1015,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::add_over_grid_image_async(std::string_view spreadsheet_id, OverGridImage const& image)
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, image]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, image]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_add_over_grid_image_request_body(image);
     if (!body) {
       return std::unexpected{body.error()};
@@ -1022,7 +1060,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::merge_cells_async(std::string_view spreadsheet_id, GridRange const& range, MergeType type)
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, range, type]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, range, type]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_merge_cells_request_body(range, type);
     if (!body) {
       return std::unexpected{body.error()};
@@ -1066,7 +1104,7 @@ template <Authenticator Auth>
 auto BasicGoogleSheetsClient<Auth>::unmerge_cells_async(std::string_view spreadsheet_id, GridRange const& range)
     -> std::future<std::expected<void, GoogleSheetsError>> {
   auto const spreadsheet = std::string{spreadsheet_id};
-  return std::async(std::launch::async, [client = *this, spreadsheet, range]() mutable -> std::expected<void, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet, range]() mutable -> std::expected<void, GoogleSheetsError> {
     auto body = detail::build_unmerge_cells_request_body(range);
     if (!body) {
       return std::unexpected{body.error()};
@@ -1108,7 +1146,7 @@ template <Authenticator Auth>
  */
 auto BasicGoogleSheetsClient<Auth>::create_new_spreadsheet_async(std::string_view title) -> std::future<std::expected<std::string, GoogleSheetsError>> {
   auto const spreadsheet_title = std::string{title};
-  return std::async(std::launch::async, [client = *this, spreadsheet_title]() mutable -> std::expected<std::string, GoogleSheetsError> {
+  return run_async([client = *this, spreadsheet_title]() mutable -> std::expected<std::string, GoogleSheetsError> {
     auto body = detail::build_create_spreadsheet_request_body(spreadsheet_title);
     if (!body) {
       return std::unexpected{body.error()};
@@ -1148,7 +1186,7 @@ template <Authenticator Auth>
  * @return 成功時は DriveFile のリスト、失敗時は GoogleSheetsError を返す future です。
  */
 auto BasicGoogleSheetsClient<Auth>::fetch_root_spreadsheets_async() -> std::future<std::expected<std::vector<DriveFile>, GoogleSheetsError>> {
-  return std::async(std::launch::async, [client = *this]() mutable -> std::expected<std::vector<DriveFile>, GoogleSheetsError> {
+  return run_async([client = *this]() mutable -> std::expected<std::vector<DriveFile>, GoogleSheetsError> {
     auto const q   = "mimeType = 'application/vnd.google-apps.spreadsheet' and 'root' in parents and trashed = false";
     auto       url = std::string{"https://www.googleapis.com/drive/v3/files"};
     url            = detail::append_query_parameter(std::move(url), "q", q);
@@ -1190,7 +1228,7 @@ template <Authenticator Auth>
  */
 auto BasicGoogleSheetsClient<Auth>::prepare_request(detail::HttpRequest& request, bool is_write) -> std::expected<void, GoogleSheetsError> {
   if constexpr (std::same_as<Auth, ApiKeyAuth>) {
-    if (auth_->api_key.empty()) {
+    if (impl_->auth->api_key.empty()) {
       return std::unexpected{GoogleSheetsError{
           .kind    = GoogleSheetsErrorKind::configuration,
           .message = "api_key is required",
@@ -1202,17 +1240,17 @@ auto BasicGoogleSheetsClient<Auth>::prepare_request(detail::HttpRequest& request
           .message = "api key authentication is read-only",
       }};
     }
-    request.url = detail::append_query_parameter(std::move(request.url), "key", auth_->api_key);
+    request.url = detail::append_query_parameter(std::move(request.url), "key", impl_->auth->api_key);
     return {};
   } else if constexpr (std::same_as<Auth, ServiceAccountConfig>) {
-    auto token = detail::get_valid_token(*auth_, shared_state_, transport_, clock_);
+    auto token = detail::get_valid_token(*impl_->auth, impl_->shared_state, impl_->transport, impl_->clock);
     if (!token) {
       return std::unexpected{token.error()};
     }
     request.headers.push_back("Authorization: Bearer " + token->access_token);
     return {};
   } else {
-    auto token = detail::get_valid_token(*auth_, shared_state_, transport_, clock_);
+    auto token = detail::get_valid_token(*impl_->auth, impl_->shared_state, impl_->transport, impl_->clock);
     if (!token) {
       return std::unexpected{token.error()};
     }
@@ -1230,13 +1268,13 @@ template <Authenticator Auth>
  */
 auto BasicGoogleSheetsClient<Auth>::execute_request(detail::HttpRequest request, bool retry_on_unauthorized) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
   auto send_request = [this](detail::HttpRequest const& current_request) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
-    if (!transport_) {
+    if (!impl_->transport) {
       return std::unexpected{GoogleSheetsError{
           .kind    = GoogleSheetsErrorKind::network,
           .message = "transport is not configured",
       }};
     }
-    return transport_(current_request);
+    return impl_->transport(current_request);
   };
 
   auto response = send_request(request);
@@ -1257,7 +1295,7 @@ auto BasicGoogleSheetsClient<Auth>::execute_request(detail::HttpRequest request,
         }
       }
 
-      auto refreshed = detail::force_refresh_token(*auth_, shared_state_, transport_, clock_, failed_access_token);
+      auto refreshed = detail::force_refresh_token(*impl_->auth, impl_->shared_state, impl_->transport, impl_->clock, failed_access_token);
       if (!refreshed) {
         return std::unexpected{refreshed.error()};
       }
