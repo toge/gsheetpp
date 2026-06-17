@@ -1,15 +1,40 @@
 # gsheetpp
 
-gsheetpp は、Google Sheets API v4 を扱うモダンな C++ 用クライアントライブラリです。  
+gsheetpp は、Google Sheets API v4 を扱うモダンな C++ 用クライアントライブラリです。
 `ApiKeyAuth`、`ServiceAccountAuth`、`UserOAuth2Auth` の 3 認証方式を 1 つの API で扱えます。
 
 ## 特徴
 
-- **非同期 API**: すべての通信を `std::future` 経由で実行
+- **非同期 API**: すべての通信を `std::future` 経由で実行 (内部で `std::launch::async` 固定)
 - **型安全なエラー処理**: `std::expected` で成功/失敗を明示
 - **認証方式の切り替え**: `set_authenticator(...)` で別の認証モデルへ再束縛
 - **JWT サービスアカウント認証**: `jwt-cpp` と OpenSSL による RS256 署名
 - **OAuth2 自動更新**: User OAuth2 は 401 応答時に 1 回だけ自動 refresh & retry
+- **PIMPL 化されたテンプレート API**: 内部実装変更時のクライアント再コンパイルを最小化
+
+## ビルド要件
+
+- C++20/23/26 いずれかのコンパイラ (CMake が自動で最上位の標準を使用)
+- `std::expected` を提供する標準ライブラリ
+  - **C++23 以降**: `<expected>` 標準ヘッダを利用
+  - **C++20 でビルドする場合**: GCC 12+ / Clang 16+ の `<expected>` 実装、または
+    `tl::expected` などの互換ヘッダへの切替が必要。本リポジトリは標準
+    `<expected>` を直接 include するため、MSVC や古い libstdc++ を使う場合は
+    C++23 以降の利用を推奨
+- vcpkg もしくは conan (依存: `catch2`, `curl`, `glaze`, `jwt-cpp`, `nlohmann-json`, `openssl`)
+
+## スレッド安全性
+
+| 操作                                                                   | スレッドセーフか | 補足                                                                                                                |
+| ---------------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 同じクライアントから `read/write/*_async` を複数スレッドで同時呼び出し | ✓               | `ClientSharedState` (mutex + cv) でアクセストークン更新が直列化されます                                             |
+| `UserOAuth2Auth` の 401 refresh & retry                                | ✓               | 並行リクエスト間で refresh が 1 本化されます (詳細は `concurrent oauth retries share one refresh after 401` テスト) |
+| `BasicGoogleSheetsClient` のコピー                                     | ✓               | `auth` / `transport` / `clock` / `shared_state` が共有されます (token キャッシュも一貫)                             |
+| `set_authenticator` の同時呼び出し                                     | ✗               | 内部状態を変更するため、呼び出し側で mutex などで直列化してください                                                 |
+| `authenticator()` による `Auth` 設定の書き換え                         | ✗               | 他の API 呼び出しと同時に行うと未定義動作になります                                                                 |
+
+ライブラリ内部の libcurl ハンドルはリクエストごとに新規確保・解放されるため、
+複数スレッドから transport を呼び出しても race を起こしません。
 
 ## スプレッドシートの新規作成
 
@@ -58,11 +83,11 @@ cd build && ctest -V
 
 ## 認証方式
 
-| 認証方式 | 用途 | 挙動 |
-| --- | --- | --- |
-| `ApiKeyAuth` | 公開スプレッドシートの read-only | `key=` クエリを付与。write は即エラー |
-| `ServiceAccountAuth` | サーバー間通信 | JWT bearer token を取得して `Authorization` ヘッダーを付与 |
-| `UserOAuth2Auth` | ユーザー委譲アクセス | アクセストークンを保持し、401 で 1 回だけ refresh & retry |
+| 認証方式             | 用途                             | 挙動                                                       |
+| -------------------- | -------------------------------- | ---------------------------------------------------------- |
+| `ApiKeyAuth`         | 公開スプレッドシートの read-only | `key=` クエリを付与。write は即エラー                      |
+| `ServiceAccountAuth` | サーバー間通信                   | JWT bearer token を取得して `Authorization` ヘッダーを付与 |
+| `UserOAuth2Auth`     | ユーザー委譲アクセス             | アクセストークンを保持し、401 で 1 回だけ refresh & retry  |
 
 ## シート管理
 
@@ -243,7 +268,7 @@ auto client = gsheetpp::BasicGoogleSheetsClient<gsheetpp::ApiKeyAuth>{
 auto result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B10").get();
 ```
 
-API key は公開シートの読み取り専用です。`write_values_async()` は `configuration` エラーを返します。  
+API key は公開シートの読み取り専用です。`write_values_async()` は `configuration` エラーを返します。
 `authenticate_async()` は no-op success で、実際の検証は `read_values_async()` 側で行われます。
 
 ### Service Account
@@ -287,7 +312,7 @@ auto const refresh_token = client.authenticator().current_refresh_token();
 auto read_result = client.read_values_async("spreadsheet-id", "Sheet1!A1:B10").get();
 ```
 
-`UserOAuth2Auth` は confidential-client 前提です。ブラウザ起動やローカル callback server はこのライブラリの対象外です。  
+`UserOAuth2Auth` は confidential-client 前提です。ブラウザ起動やローカル callback server はこのライブラリの対象外です。
 認可コード取得後のトークン交換、refresh token 保持、401 時の 1 回だけの自動再試行を担当します。
 
 ## 補足
@@ -305,6 +330,54 @@ gsheetpp_example oauth-code <client-id> <client-secret> <redirect-uri> <authoriz
 gsheetpp_example oauth-refresh <client-id> <client-secret> <refresh-token> <spreadsheet-id> <read-range> <write-range> <write-values-json>
 ```
 
+## 付録: 公開フィールド名と Google API パラメータの対応
+
+gsheetpp の公開型は designated initializer での記述性を優先して snake_case を採用しています。
+Google Sheets API 本体の camelCase / camelCase フィールドとの対応は以下の通りです。
+
+| gsheetpp (公開型)                    | Google API フィールド      | 用途               |
+| ------------------------------------ | -------------------------- | ------------------ |
+| `ApiKeyAuth::api_key`                | `key` (クエリ)             | API Key 認証       |
+| `ServiceAccountConfig::client_email` | `client_email`             | サービスアカウント |
+| `ServiceAccountConfig::private_key`  | `private_key`              | サービスアカウント |
+| `ServiceAccountConfig::token_uri`    | `token_uri`                | サービスアカウント |
+| `ServiceAccountConfig::project_id`   | `project_id`               | サービスアカウント |
+| `UserOAuth2Auth::client_id`          | `client_id`                | OAuth2             |
+| `UserOAuth2Auth::client_secret`      | `client_secret`            | OAuth2             |
+| `UserOAuth2Auth::token_uri`          | `token_uri`                | OAuth2             |
+| `UserOAuth2Auth::redirect_uri`       | `redirect_uri`             | OAuth2             |
+| `UserOAuth2Auth::authorization_code` | `code` (フォーム)          | OAuth2 初回        |
+| `UserOAuth2Auth::refresh_token`      | `refresh_token` (フォーム) | OAuth2 更新        |
+| `TokenInfo::access_token`            | `access_token`             | トークン応答       |
+| `TokenInfo::token_type`              | `token_type`               | トークン応答       |
+| `TokenInfo::expires_in_seconds`      | `expires_in`               | トークン応答       |
+| `SheetMetadata::title`               | `title`                    | シートプロパティ   |
+| `SheetMetadata::sheet_id`            | `sheetId`                  | シートプロパティ   |
+| `Color::red / green / blue`          | `red / green / blue`       | セル色             |
+| `GridRange::sheet_id`                | `sheetId`                  | 範囲指定           |
+| `GridRange::start_row`               | `startRowIndex`            | 範囲指定           |
+| `GridRange::end_row`                 | `endRowIndex`              | 範囲指定           |
+| `GridRange::start_column`            | `startColumnIndex`         | 範囲指定           |
+| `GridRange::end_column`              | `endColumnIndex`           | 範囲指定           |
+| `OverlayPosition::sheet_id`          | `sheetId`                  | 画像/チャート配置  |
+| `OverlayPosition::row_index`         | `rowIndex`                 | 画像/チャート配置  |
+| `OverlayPosition::column_index`      | `columnIndex`              | 画像/チャート配置  |
+| `OverlayPosition::offset_x_pixels`   | `offsetXPixels`            | 画像/チャート配置  |
+| `OverlayPosition::offset_y_pixels`   | `offsetYPixels`            | 画像/チャート配置  |
+| `OverlayPosition::width_pixels`      | `widthPixels`              | 画像/チャート配置  |
+| `OverlayPosition::height_pixels`     | `heightPixels`             | 画像/チャート配置  |
+| `OverGridImage::source_uri`          | `sourceUri`                | 画像追加           |
+| `ReadValuesResult::range`            | `range`                    | 値取得応答         |
+| `ReadValuesResult::major_dimension`  | `majorDimension`           | 値取得応答         |
+| `WriteValuesResult::spreadsheet_id`  | `spreadsheetId`            | 値更新応答         |
+| `WriteValuesResult::updated_range`   | `updatedRange`             | 値更新応答         |
+| `WriteValuesResult::updated_rows`    | `updatedRows`              | 値更新応答         |
+| `WriteValuesResult::updated_columns` | `updatedColumns`           | 値更新応答         |
+| `WriteValuesResult::updated_cells`   | `updatedCells`             | 値更新応答         |
+| `GoogleSheetsError::http_status`     | HTTP ステータス            | エラー応答         |
+| `GoogleSheetsError::response_body`   | HTTP レスポンス本文        | エラー応答         |
+
 ## ライセンス
 
 MIT
+
