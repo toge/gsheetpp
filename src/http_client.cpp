@@ -8,6 +8,16 @@
 /**
  * @file http_client.cpp
  * @brief libcurl を使って detail::HttpRequest を送信する実装です。
+ *
+ * 設計ノート:
+ *   - libcurl の curl_easy_* 関数群はハンドル単位で非スレッドセーフです。
+ *     そのため本実装ではリクエストごとに新しい easy handle を確保し、
+ *     使い終わったら必ず cleanup します。これにより複数スレッドから同時に
+ *     transport を呼び出しても race を起こしません。
+ *   - ボディは CURLOPT_COPYPOSTFIELDS を使って libcurl 側に複製させています。
+ *     これによりリクエスト送信が完了するまで呼び出し側の body 文字列を
+ *     生存させておく必要がなく、401 retry 時のように元の body 文字列を
+ *     別用途に move してしまっても安全に再送できます。
  */
 
 namespace gsheetpp::http {
@@ -40,6 +50,46 @@ namespace {
     });
   }
 
+  /**
+   * @brief 1 回のリクエストで必要となる libcurl リソースを RAII で管理します。
+   *
+   * curl_easy_init の戻り値と curl_slist を対にして保持し、デストラクタで
+   * 漏れなく解放します。例外安全のために用意しています。
+   */
+  class EasyRequestHandle {
+public:
+    EasyRequestHandle() = default;
+
+    EasyRequestHandle(EasyRequestHandle const&)                    = delete;
+    auto operator=(EasyRequestHandle const&) -> EasyRequestHandle& = delete;
+    EasyRequestHandle(EasyRequestHandle&&)                         = delete;
+    auto operator=(EasyRequestHandle&&) -> EasyRequestHandle&      = delete;
+
+    ~EasyRequestHandle() {
+      if (header_list_ != nullptr) {
+        curl_slist_free_all(header_list_);
+      }
+      if (curl_ != nullptr) {
+        curl_easy_cleanup(curl_);
+      }
+    }
+
+    auto init() -> bool {
+      curl_ = curl_easy_init();
+      return curl_ != nullptr;
+    }
+
+    auto curl() -> CURL* { return curl_; }
+    auto append_header(char const* header_line) -> void {
+      header_list_ = curl_slist_append(header_list_, header_line);
+    }
+    auto headers() -> curl_slist* { return header_list_; }
+
+private:
+    CURL*      curl_{nullptr};
+    curl_slist* header_list_{nullptr};
+  };
+
 }  // namespace
 
 /**
@@ -50,20 +100,20 @@ namespace {
 auto perform_http_request(detail::HttpRequest const& request) -> std::expected<detail::HttpResponse, GoogleSheetsError> {
   ensure_curl_initialized();
 
-  auto* curl = curl_easy_init();
-  if (curl == nullptr) {
+  auto handle = EasyRequestHandle{};
+  if (!handle.init()) {
     return std::unexpected{GoogleSheetsError{
         .kind    = GoogleSheetsErrorKind::network,
         .message = "failed to initialize curl",
     }};
   }
+  auto* curl = handle.curl();
 
-  auto  response    = detail::HttpResponse{};
-  auto* header_list = static_cast<curl_slist*>(nullptr);
+  auto response = detail::HttpResponse{};
 
   // 呼び出し側が組み立てたヘッダー列を、そのまま libcurl の slist に移します。
   for (auto const& header : request.headers) {
-    header_list = curl_slist_append(header_list, header.c_str());
+    handle.append_header(header.c_str());
   }
 
   auto constexpr CONNECT_TIMEOUT_SECONDS = 10L;
@@ -72,7 +122,7 @@ auto perform_http_request(detail::HttpRequest const& request) -> std::expected<d
   curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str());
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CONNECT_TIMEOUT_SECONDS);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, TOTAL_TIMEOUT_SECONDS);
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, handle.headers());
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -84,8 +134,10 @@ auto perform_http_request(detail::HttpRequest const& request) -> std::expected<d
   }
 
   if (!request.body.empty()) {
+    // COPYPOSTFIELDS を使うことで、libcurl が必要なサイズを確定する前に
+    // 呼び出し側 body 文字列が破棄されても安全です。
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.body.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+    curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, request.body.size());
   }
 
   // 通信エラーと HTTP エラーステータスは分けて扱いたいため、
@@ -96,15 +148,10 @@ auto perform_http_request(detail::HttpRequest const& request) -> std::expected<d
         .kind    = GoogleSheetsErrorKind::network,
         .message = curl_easy_strerror(result),
     };
-    curl_slist_free_all(header_list);
-    curl_easy_cleanup(curl);
     return std::unexpected{error};
   }
 
   std::ignore = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status_code);
-
-  curl_slist_free_all(header_list);
-  curl_easy_cleanup(curl);
   return response;
 }
 

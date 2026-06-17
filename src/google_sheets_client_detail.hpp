@@ -7,14 +7,10 @@
 
 #include "gsheetpp/google_sheets_client.hpp"
 
-#include <condition_variable>
-#include <expected>
-#include <mutex>
-
 namespace gsheetpp::detail {
 
 /**
- * @brief RefreshInProgressGuard を初期化します。
+ * @brief RefreshInProgressGuard のインライン定義 (例外安全のためヘッダに置く)。
  * @param mutex refresh 状態を保護する mutex です。
  * @param cv refresh 完了通知用 condition_variable です。
  * @param refresh_in_progress refresh 中フラグへの参照です。
