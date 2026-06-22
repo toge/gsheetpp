@@ -87,6 +87,7 @@ struct BatchUpdatePayload {
   struct ReplyPayload {
     struct AddSheetReplyPayload {
       SheetMetadata properties{};
+      AddSheetReplyPayload() : properties{} {}
     };
     std::optional<AddSheetReplyPayload> addSheet{};
   };
