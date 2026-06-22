@@ -4,22 +4,9 @@ project(gsheetpp
   LANGUAGES CXX
 )
 
-include(CheckCXXCompilerFlag)
+option(BUILD_TEST "Enable tests" ON)
+
 include(CheckIPOSupported)
-
-check_cxx_compiler_flag("-std=c++26" COMPILER_SUPPORTS_CXX26)
-check_cxx_compiler_flag("-std=c++23" COMPILER_SUPPORTS_CXX23)
-check_cxx_compiler_flag("-std=c++20" COMPILER_SUPPORTS_CXX20)
-
-if (COMPILER_SUPPORTS_CXX26)
-  set(STD_CPP cxx_std_26)
-elseif (COMPILER_SUPPORTS_CXX23)
-  set(STD_CPP cxx_std_23)
-elseif (COMPILER_SUPPORTS_CXX20)
-  set(STD_CPP cxx_std_20)
-else ()
-  message(FATAL_ERROR "A C++20 or newer compiler is required.")
-endif ()
 
 if (CMAKE_COMPILER_IS_GNUCXX)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic -g3 -O3 -march=native")
@@ -61,7 +48,7 @@ target_sources(gsheetpp
     ${CMAKE_SOURCE_DIR}/src/google_sheets_client.cpp
     ${CMAKE_SOURCE_DIR}/src/http_client.cpp
 )
-target_compile_features(gsheetpp PUBLIC ${STD_CPP})
+target_compile_features(gsheetpp PUBLIC cxx_std_23)
 target_include_directories(gsheetpp
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -120,11 +107,13 @@ install(FILES
 
 add_executable(gsheetpp_example ${CMAKE_SOURCE_DIR}/examples/main.cpp)
 target_link_libraries(gsheetpp_example PRIVATE gsheetpp)
-target_compile_features(gsheetpp_example PRIVATE ${STD_CPP})
+target_compile_features(gsheetpp_example PRIVATE cxx_std_23)
 
 add_executable(gsheetpp_oauth_sample ${CMAKE_SOURCE_DIR}/examples/oauth_sample.cpp)
 target_link_libraries(gsheetpp_oauth_sample PRIVATE gsheetpp)
-target_compile_features(gsheetpp_oauth_sample PRIVATE ${STD_CPP})
+target_compile_features(gsheetpp_oauth_sample PRIVATE cxx_std_23)
 
-enable_testing()
-add_subdirectory(test)
+if(BUILD_TEST)
+  enable_testing()
+  add_subdirectory(test)
+endif()

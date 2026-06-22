@@ -10,6 +10,6 @@ target_include_directories(all_test
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
 )
-target_compile_features(all_test PRIVATE ${STD_CPP})
+target_compile_features(all_test PRIVATE cxx_std_23)
 
 add_test(NAME all_test COMMAND all_test -r junit)
