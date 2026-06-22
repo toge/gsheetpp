@@ -122,5 +122,9 @@ add_executable(gsheetpp_example ${CMAKE_SOURCE_DIR}/examples/main.cpp)
 target_link_libraries(gsheetpp_example PRIVATE gsheetpp)
 target_compile_features(gsheetpp_example PRIVATE ${STD_CPP})
 
+add_executable(gsheetpp_oauth_sample ${CMAKE_SOURCE_DIR}/examples/oauth_sample.cpp)
+target_link_libraries(gsheetpp_oauth_sample PRIVATE gsheetpp)
+target_compile_features(gsheetpp_oauth_sample PRIVATE ${STD_CPP})
+
 enable_testing()
 add_subdirectory(test)
