@@ -4,7 +4,8 @@ project(gsheetpp
   LANGUAGES CXX
 )
 
-option(BUILD_TEST "Enable tests" ON)
+option(BUILD_TEST "Build tests" ON)
+option(BUILD_EXAMPLE "Build examples" ON)
 
 include(CheckIPOSupported)
 
@@ -106,13 +107,15 @@ install(FILES
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gsheetpp
 )
 
-add_executable(gsheetpp_example ${CMAKE_SOURCE_DIR}/examples/main.cpp)
-target_link_libraries(gsheetpp_example PRIVATE gsheetpp)
-target_compile_features(gsheetpp_example PRIVATE cxx_std_23)
+if(BUILD_EXAMPLE)
+  add_executable(gsheetpp_example ${CMAKE_SOURCE_DIR}/examples/main.cpp)
+  target_link_libraries(gsheetpp_example PRIVATE gsheetpp)
+  target_compile_features(gsheetpp_example PRIVATE cxx_std_23)
 
-add_executable(gsheetpp_oauth_sample ${CMAKE_SOURCE_DIR}/examples/oauth_sample.cpp)
-target_link_libraries(gsheetpp_oauth_sample PRIVATE gsheetpp)
-target_compile_features(gsheetpp_oauth_sample PRIVATE cxx_std_23)
+  add_executable(gsheetpp_oauth_sample ${CMAKE_SOURCE_DIR}/examples/oauth_sample.cpp)
+  target_link_libraries(gsheetpp_oauth_sample PRIVATE gsheetpp)
+  target_compile_features(gsheetpp_oauth_sample PRIVATE cxx_std_23)
+endif()
 
 if(BUILD_TEST)
   enable_testing()
