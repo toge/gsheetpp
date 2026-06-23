@@ -63,7 +63,7 @@ TEST_CASE("refresh guard clears flag and notifies on exception", "[client]") {
   auto refresh_in_progress = true;
   auto released            = std::atomic_bool{false};
 
-  auto waiter = std::jthread{[&] {
+  auto waiter = std::thread{[&] {
     auto lock = std::unique_lock{mutex};
     cv.wait(lock, [&] { return !refresh_in_progress; });
     released = true;
